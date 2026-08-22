@@ -316,6 +316,12 @@ function send(obj) {
 
 // ---- JSON message routing ----
 let lastContentBbox = null; // {x0,y0,x1,y1} in canvas-pixel space, or null
+// Whether "Adatta contenuto" should keep re-fitting as new content_bbox
+// events arrive, not just once at click time -- a *static* fit computed
+// from a single short line (a fresh shell prompt, say) crops tight around
+// it, and every line typed afterward lands below the still-visible area
+// until the next manual click. See fitToContent() below.
+let fitContentActive = false;
 
 function handleJsonMessage(msg) {
   if (msg.type === 'log') addLog(msg.text);
@@ -324,6 +330,7 @@ function handleJsonMessage(msg) {
   else if (msg.type === 'console_state') handleConsoleState(msg);
   else if (msg.type === 'content_bbox') {
     lastContentBbox = { x0: msg.x, y0: msg.y, x1: msg.x + msg.w, y1: msg.y + msg.h };
+    if (fitContentActive) fitToContent();
   }
 }
 
@@ -483,6 +490,7 @@ btnFit.classList.add('toggled'); // "fit" is the default (see #videoWrap.fit in 
 btnFit.onclick = () => {
   videoWrap.classList.toggle('fit');
   btnFit.classList.toggle('toggled', videoWrap.classList.contains('fit'));
+  setFitContentActive(false); // an explicit "fit the whole frame" click wins over auto-follow
   resetZoom();
 };
 
@@ -655,6 +663,21 @@ function resetZoom() {
 // content_bbox messages; this reuses the exact same zoomState/transform the
 // pinch-zoom gesture drives, it just computes where to land it instead of
 // following two fingers.
+//
+// It's a *toggle*, not a one-shot action (fitContentActive, set from here
+// and from handleJsonMessage's content_bbox branch above): a single fit
+// computed once, from -- say -- one freshly-drawn shell prompt line, crops
+// tight around just that line, and every line the user types afterward
+// lands below the still-visible area, invisible, until they notice and
+// click the button again. Re-running the same fit on every content_bbox
+// update instead keeps it tracking a growing/scrolling console live.
+const btnFitContent = document.getElementById('btnFitContent');
+
+function setFitContentActive(active) {
+  fitContentActive = active;
+  btnFitContent.classList.toggle('toggled', active);
+}
+
 function fitToContent() {
   if (!lastContentBbox) return;
   videoWrap.classList.add('fit');
@@ -666,7 +689,18 @@ function fitToContent() {
   if (!canvas.width || !canvasRect.width) return;
   const baseScale = canvasRect.width / canvas.width; // canvas px -> baseline CSS px
 
-  const { x0, y0, x1, y1 } = lastContentBbox;
+  // Pad the box before fitting: a single short line has almost no height,
+  // and cropping *exactly* to it leaves zero headroom for the next line to
+  // still be inside frame -- padding buys some breathing room on every
+  // side (more vertically, where new lines actually accumulate).
+  const { x0: rx0, y0: ry0, x1: rx1, y1: ry1 } = lastContentBbox;
+  const padX = Math.max(24, (rx1 - rx0) * 0.08);
+  const padY = Math.max(24, (ry1 - ry0) * 0.25);
+  const x0 = Math.max(0, rx0 - padX);
+  const y0 = Math.max(0, ry0 - padY);
+  const x1 = Math.min(canvas.width, rx1 + padX);
+  const y1 = Math.min(canvas.height, ry1 + padY);
+
   const boxCssW = (x1 - x0) * baseScale;
   const boxCssH = (y1 - y0) * baseScale;
   if (boxCssW <= 0 || boxCssH <= 0) return;
@@ -682,7 +716,10 @@ function fitToContent() {
   };
   applyZoomTransform();
 }
-document.getElementById('btnFitContent').onclick = fitToContent;
+btnFitContent.onclick = () => {
+  setFitContentActive(!fitContentActive);
+  if (fitContentActive) fitToContent();
+};
 
 function pinchGeometry() {
   const pts = [...activePointers.values()];
@@ -714,6 +751,7 @@ canvas.addEventListener('pointerdown', (e) => {
 
   if (activePointers.size === 2) {
     lastX = lastY = null; // a second finger cancels any remote-cursor drag
+    setFitContentActive(false); // a manual pinch wins over auto-follow
     const g = pinchGeometry();
     pinch = { startDist: g.dist, startMidX: g.midX, startMidY: g.midY,
               startScale: zoomState.scale, startX: zoomState.x, startY: zoomState.y };
