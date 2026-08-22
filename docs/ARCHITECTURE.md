@@ -155,19 +155,9 @@ pixels (`PIL.Image.getbbox()` -- black already *is* its notion of
 part of a mostly-black BIOS/terminal screen that actually has content on
 it instead of fitting the whole (often mostly empty) reported resolution.
 `webserver.py` broadcasts it as a `content_bbox` event alongside every
-frame update; `web/index.html`'s "Adatta contenuto" button is a *toggle*
-(`fitContentActive`), not a one-shot action -- turning it on re-runs
-`fitToContent()` on every subsequent `content_bbox` event too, so the
-view keeps tracking a growing/scrolling console instead of freezing on
-whatever the box looked like at the moment it was clicked (a fit computed
-once from a single freshly-drawn prompt line, say, would otherwise crop
-tight around just that line, with everything typed afterward landing
-outside the still-visible area). It computes a zoom/pan from a padded
-version of the box -- a short line has almost no height, and fitting
-*exactly* to it leaves no headroom for the next line -- and applies it
-through the same `zoomState`/`applyZoomTransform()` the pinch-zoom gesture
-uses; a manual pinch or the plain "Adatta" button turns auto-follow back
-off so they don't fight each other.
+frame update; `web/index.html`'s "Adatta contenuto" button (`fitToContent()`)
+computes a zoom/pan from the latest one and applies it through the same
+`zoomState`/`applyZoomTransform()` the pinch-zoom gesture uses.
 
 Both return `(x, y, w, h, jpeg_bytes)`. Nothing about any of this is
 web-specific -- a different consumer could hang a different renderer, or a
