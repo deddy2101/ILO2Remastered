@@ -210,7 +210,6 @@
         <button class="btn" id="btnClickL">🖱 Click sx</button>
         <button class="btn" id="btnClickR">🖱 Click dx</button>
         <button class="btn" id="btnFit">⤢ Adatta</button>
-        <button class="btn" id="btnFitContent">🔍 Adatta contenuto</button>
       </div>
       <div id="videoWrap" class="fit">
         <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
@@ -315,16 +314,11 @@ function send(obj) {
 }
 
 // ---- JSON message routing ----
-let lastContentBbox = null; // {x0,y0,x1,y1} in canvas-pixel space, or null
-
 function handleJsonMessage(msg) {
   if (msg.type === 'log') addLog(msg.text);
   else if (msg.type === 'info') renderInfo(msg);
   else if (msg.type === 'status') renderStatus(msg);
   else if (msg.type === 'console_state') handleConsoleState(msg);
-  else if (msg.type === 'content_bbox') {
-    lastContentBbox = { x0: msg.x, y0: msg.y, x1: msg.x + msg.w, y1: msg.y + msg.h };
-  }
 }
 
 // ---- console connection state (avoid just showing a blank black canvas) ----
@@ -646,44 +640,6 @@ function resetZoom() {
   zoomState = { scale: 1, x: 0, y: 0 };
   applyZoomTransform();
 }
-
-// "Fit content": most consoles are a dark terminal/BIOS screen with real
-// content in one corner (or a small chunk in the middle) and a lot of dead
-// black space around it -- fitting the *whole* frame wastes most of the
-// zoom on that black space. The server tracks the bounding box of non-black
-// pixels (PIL's getbbox(), see FrameBuffer.content_bbox) and pushes it as
-// content_bbox messages; this reuses the exact same zoomState/transform the
-// pinch-zoom gesture drives, it just computes where to land it instead of
-// following two fingers.
-function fitToContent() {
-  if (!lastContentBbox) return;
-  videoWrap.classList.add('fit');
-  btnFit.classList.add('toggled');
-  resetZoom(); // back to the baseline 100%-wide "fit" rendering, so the
-               // measurements below aren't skewed by whatever zoom was active
-  const canvasRect = canvas.getBoundingClientRect();
-  const wrapRect = videoWrap.getBoundingClientRect();
-  if (!canvas.width || !canvasRect.width) return;
-  const baseScale = canvasRect.width / canvas.width; // canvas px -> baseline CSS px
-
-  const { x0, y0, x1, y1 } = lastContentBbox;
-  const boxCssW = (x1 - x0) * baseScale;
-  const boxCssH = (y1 - y0) * baseScale;
-  if (boxCssW <= 0 || boxCssH <= 0) return;
-
-  const scale = Math.min(5, Math.max(1,
-    Math.min(wrapRect.width / boxCssW, wrapRect.height / boxCssH) * 0.96));
-  const centerX = (x0 + (x1 - x0) / 2) * baseScale;
-  const centerY = (y0 + (y1 - y0) / 2) * baseScale;
-  zoomState = {
-    scale,
-    x: wrapRect.width / 2 - centerX * scale,
-    y: wrapRect.height / 2 - centerY * scale,
-  };
-  applyZoomTransform();
-}
-document.getElementById('btnFitContent').onclick = fitToContent;
-
 function pinchGeometry() {
   const pts = [...activePointers.values()];
   return {
