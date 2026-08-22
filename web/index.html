@@ -97,6 +97,15 @@
      shrinks to just the summary. */
   #consoleCard[open] { display: flex; flex-direction: column; height: 80vh; }
   #consoleBody { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  /* Fullscreen the whole card (toolbar included), not just #videoWrap --
+     the toolbar has the only way back out (well, besides Esc) plus
+     Ctrl+Alt+Canc, the on-screen keyboard toggle, etc., and none of that
+     is reachable while fullscreen if it's not inside the fullscreen
+     element itself. Browser-native fullscreen scaling also just works,
+     no custom fit/zoom math to get wrong (see git history: it's been
+     wrong twice already). */
+  #consoleCard:fullscreen { height: 100vh; background: var(--surface); }
+  #consoleCard:fullscreen #videoWrap { flex: 1; }
   #toolbar {
     display: flex; gap: 8px; padding: 10px; flex-wrap: wrap;
     background: var(--surface-2); border-bottom: 1px solid var(--border);
@@ -210,6 +219,7 @@
         <button class="btn" id="btnClickL">🖱 Click sx</button>
         <button class="btn" id="btnClickR">🖱 Click dx</button>
         <button class="btn" id="btnFit">⤢ Adatta</button>
+        <button class="btn" id="btnFullscreen">⛶ Schermo intero</button>
       </div>
       <div id="videoWrap" class="fit">
         <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
@@ -479,6 +489,24 @@ btnFit.onclick = () => {
   btnFit.classList.toggle('toggled', videoWrap.classList.contains('fit'));
   resetZoom();
 };
+
+// ---- fullscreen ----
+const consoleCard = document.getElementById('consoleCard');
+const btnFullscreen = document.getElementById('btnFullscreen');
+btnFullscreen.onclick = () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    consoleCard.requestFullscreen().catch(() => {
+      addLog('[fullscreen] richiesta rifiutata dal browser');
+    });
+  }
+};
+document.addEventListener('fullscreenchange', () => {
+  const active = document.fullscreenElement === consoleCard;
+  btnFullscreen.classList.toggle('toggled', active);
+  btnFullscreen.textContent = active ? '⛶ Esci da schermo intero' : '⛶ Schermo intero';
+});
 
 document.getElementById('btnClickL').onclick = () => {
   send({ type: 'mousedown', button: 'left' });
