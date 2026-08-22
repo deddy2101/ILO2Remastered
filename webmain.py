@@ -5,7 +5,7 @@ any particular renderer -- open web/index.html in a browser, or point any
 other client (future HLS transcoder, diagnostics dashboard) at the same
 WebSocket.
 
-Credentials come from the environment (see .env / main.py's loader):
+Credentials come from the environment (see .env / ilo2/dotenv.py):
     ILO_HOST, ILO_USER, ILO_PASSWORD
 """
 import argparse

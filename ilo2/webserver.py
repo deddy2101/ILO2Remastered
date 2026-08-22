@@ -1,9 +1,9 @@
-"""Serves the iLO2 remote console over the web instead of a native window:
-a WebSocket pushes JPEG frame snapshots + log lines to any number of
-browser clients and accepts keyboard/mouse/power commands back, and a
-plain HTTP server serves the static frontend page. Nothing here is tied to
-Tkinter or to any single "renderer" -- point any client (a browser tab, a
-future HLS transcoder, a diagnostics dashboard) at the same WebSocket.
+"""Serves the iLO2 remote console over the web: a WebSocket pushes JPEG
+frame snapshots + log lines to any number of browser clients and accepts
+keyboard/mouse/power commands back, and a plain HTTP server serves the
+static frontend page. Nothing here is tied to any single "renderer" --
+point any client (a browser tab, a future HLS transcoder, a diagnostics
+dashboard) at the same WebSocket.
 """
 import asyncio
 import functools

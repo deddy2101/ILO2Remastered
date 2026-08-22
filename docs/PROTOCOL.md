@@ -213,9 +213,9 @@ an absolute/high-performance mode with server-side cursor sync
 (`MouseSync.class`) that wasn't reimplemented.
 
 Keyboard bytes for plain printable characters are just their US-ASCII
-value. Special keys use `ESC [ <letter>` sequences (see
-`_SPECIAL_KEYS`/`SPECIAL` tables in `ilo2/gui.py` and `web/index.html` for
-the ones implemented: arrows, Home/End/PgUp/PgDn/Insert, F1-F12,
+value. Special keys use `ESC [ <letter>` sequences (see the `SPECIAL`
+table in `web/index.html` for the ones implemented: arrows,
+Home/End/PgUp/PgDn/Insert, F1-F12,
 Tab/Enter/Backspace/Delete/Escape). The original applet has a much larger
 table covering Shift/Ctrl/Alt-modified variants of every special key
 (`cim.translate_special_key()` in the decompiled source) that wasn't fully
@@ -298,8 +298,8 @@ dispatch, not a real Huffman table). Broad groups of states:
 `DvcDecoder.on_block(x, y, pixels)` fires once a 16x16 block is complete,
 with `pixels` a flat list of up to 256 packed `0xRRGGBB` ints (row-major).
 `on_resize(w, h)` fires when `MODE2` establishes real dimensions.
-Consumers (`FrameBuffer`, or the Tkinter canvas) just paste each block
-into an image at `(x, y)`.
+The consumer (`FrameBuffer`) just pastes each block into an image at
+`(x, y)`.
 
 ## 7. Re-deriving any of this yourself
 

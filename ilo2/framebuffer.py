@@ -1,9 +1,9 @@
 """Thread-safe live framebuffer, decoupled from any particular renderer.
 
 The DVC decoder runs on the console's own receiver thread and calls back
-into this as blocks arrive. Consumers (a websocket broadcaster, a Tkinter
-canvas, a test script) just take a JPEG snapshot whenever they want one --
-no assumption about who's reading it or how often.
+into this as blocks arrive. Consumers (the websocket broadcaster, a test
+script) just take a JPEG snapshot whenever they want one -- no assumption
+about who's reading it or how often.
 """
 import io
 import threading

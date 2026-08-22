@@ -102,7 +102,7 @@ class IloConsole:
             log_fn=log_fn,
         )
 
-        # UI-facing callbacks; gui.py overrides these.
+        # UI-facing callbacks; webserver.py overrides these.
         self.on_frame_block = lambda x, y, px: None
         self.on_video_size = lambda w, h: None
         self.on_status_text = lambda field, text: None

@@ -71,10 +71,6 @@ Then open **http://localhost:8080/** in any browser (or "Add to Home
 Screen" on a phone — it's installable). Video, keyboard, mouse, power
 controls, and live sensors all work from that one page.
 
-There's also a native Tkinter client (`python3 main.py`) with the core
-console feature set; see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for why
-the web client is the recommended path.
-
 ### 🐳 Or with Docker
 
 ```bash

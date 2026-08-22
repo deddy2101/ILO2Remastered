@@ -12,8 +12,7 @@ ilo2/
                    wires decoded video + keyboard/mouse into/out of dvc.py
   framebuffer.py   Thread-safe live screen image, decoupled from any renderer
   auth.py          Session-cookie login, rate limiting -- used by webserver.py only
-  dotenv.py        Tiny .env loader shared by main.py and webmain.py
-  gui.py           Tkinter client (native window)
+  dotenv.py        Tiny .env loader for webmain.py
   webserver.py     WebSocket + HTTP server (browser client), status polling,
                    console connection lifecycle, auth wiring
 web/
@@ -23,8 +22,7 @@ web/
   manifest.json    PWA manifest (installable "Add to Home Screen")
   sw.js            Service worker: network-first, offline app-shell fallback only
   icons/           PWA icons
-main.py            Entry point for the Tkinter client
-webmain.py         Entry point for the web client
+webmain.py         Entry point
 Dockerfile,
 docker-compose.yml Container packaging for the web client; config comes in via
                    environment variables (see .env.example), nothing baked into
@@ -32,16 +30,16 @@ docker-compose.yml Container packaging for the web client; config comes in via
 docs/              This documentation
 ```
 
-## Two clients, one backend
+## Protocol layer vs. server
 
-`ilo2/` has no UI code in it except `gui.py` (which is itself just one
-consumer). Everything else -- login, crypto, video decode, KVM socket
-handling -- is UI-agnostic. `main.py` (Tkinter) and `webmain.py`
-(WebSocket) are two different front ends bolted onto the same backend;
-adding a third (say, a proper HLS transcoder, or a CLI status tool) means
-writing a new thin consumer, not touching the protocol code.
+Everything in `ilo2/` except `webserver.py` and `auth.py` is UI-agnostic --
+login, crypto, video decode, and KVM socket handling don't know or care who
+consumes them. `webmain.py` + `ilo2/webserver.py` is the one consumer today,
+but adding another (a CLI status tool, a proper HLS transcoder) means
+writing a new thin consumer against this same shape, not touching the
+protocol code.
 
-The shape both clients follow:
+The shape a consumer follows:
 
 ```
 IloSession.login()                      -- web UI cookie auth
@@ -137,18 +135,16 @@ re-keying.
 
 `FrameBuffer` is a thread-safe `PIL.Image` with a version counter and a
 `jpeg_snapshot()` method. It exists so `console.py` doesn't need to know or
-care who's watching -- the Tkinter client polls its own copy of the pasted
-blocks, the web server polls this shared one and re-encodes to JPEG on a
-timer. Nothing about it is web- or Tkinter-specific.
+care who's watching -- `webserver.py` polls it on a timer and re-encodes to
+JPEG for whatever browsers are currently connected. Nothing about it is
+web-specific; a different consumer could hang an encoder or a different
+renderer off the same seam.
 
 ## `ilo2/dotenv.py`
 
 Just the `.env` loader (`KEY=VALUE` lines into `os.environ`, never
-overriding what's already set). Split out of `main.py` specifically so
-`webmain.py` doesn't have to import `main.py` -- which pulls in `gui.py`,
-which imports Tkinter -- just to read a config file. That import chain used
-to break the web-only entry point on any headless machine without Tkinter
-installed, which defeats the point of it being the headless-friendly path.
+overriding what's already set), kept as its own tiny module rather than
+inlined into `webmain.py` for no reason more interesting than tidiness.
 
 ## `ilo2/auth.py`
 
@@ -169,16 +165,6 @@ are both set (unset by default -- LAN-only use needs none of this):
   `X-Forwarded-Proto: https` -- see the TLS-reverse-proxy note in the
   top-level README before exposing this beyond a LAN.
 
-## `ilo2/gui.py` (Tkinter client)
-
-Straightforward, with one non-obvious bit: **all cross-thread UI updates go
-through a `queue.Queue` drained by `root.after()` on the main thread**,
-never `root.after()` called directly from a background thread. On macOS's
-Aqua Tk build, `.after()` scheduled from a non-main thread can silently
-no-op (this was found the hard way -- see DEVELOPMENT.md). Login, the
-console's receiver thread, and RIBCL power calls all run off the main
-thread, so this matters everywhere.
-
 ## `ilo2/webserver.py` + `web/` (web client)
 
 `WebServer`:
@@ -195,9 +181,9 @@ thread, so this matters everywhere.
   so it needs its own enforcement, not just a login screen in front of the
   page
 - the actual iLO2 connection (`IloSession` + `IloConsole`) runs in a plain
-  background thread, same shape as the Tkinter client's worker, bridged to
-  the asyncio side only via the `FrameBuffer` and a thread-safe event queue
-  -- no asyncio-specific code leaks into the protocol layer
+  background thread, bridged to the asyncio side only via the
+  `FrameBuffer` and a thread-safe event queue -- no asyncio-specific code
+  leaks into the protocol layer
 - `_connecting` is a `threading.Lock` used as a non-blocking guard so a
   stray double "start console" (e.g. auto-start-on-boot racing a manual
   button click) can't fire two logins at once and stomp each other's

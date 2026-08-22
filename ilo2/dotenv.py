@@ -1,6 +1,4 @@
-"""Tiny .env loader (no external dependency), shared by main.py (Tkinter
-client) and webmain.py (web client) -- kept out of both so neither entry
-point has to import the other's dependencies just to read the .env file."""
+"""Tiny .env loader (no external dependency) for webmain.py."""
 import os
 from pathlib import Path
 

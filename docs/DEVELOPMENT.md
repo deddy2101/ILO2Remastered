@@ -9,21 +9,12 @@ cp .env.example .env
 $EDITOR .env   # set ILO_HOST / ILO_USER / ILO_PASSWORD
 ```
 
-Run the web client (recommended -- see "Tkinter on macOS" below):
-
 ```bash
 python3 webmain.py            # http://localhost:8080/
 ```
 
-Or the native client:
-
-```bash
-python3 main.py
-```
-
-Both read `.env` automatically (`main.py::load_dotenv`), or take
-`--host`/`--user`/`--password`/etc. on the command line, which override
-`.env`.
+Reads `.env` automatically, or takes `--host`/`--user`/`--password`/etc. on
+the command line, which override `.env`.
 
 ## Known iLO2-side quirks
 
@@ -123,48 +114,53 @@ this box does not appreciate being hammered.
 
 ## Codebase-side gotchas
 
-### Tkinter on macOS and cross-thread `.after()`
+### Why there's no native (Tkinter) client
 
-`ilo2/gui.py`'s login/console/RIBCL calls all run on background threads.
-Early versions called `root.after(0, fn)` directly from those threads to
-push UI updates (append a log line, resize the canvas). **This silently
-did nothing on this machine's macOS/Aqua Tk build** -- no exception, the
-scheduled callback just never ran. This is why the on-screen log stayed
-empty even though the underlying connection was progressing fine (visible
-only via `print()` to the terminal). Fixed by never touching
-`root.after()`/any Tk widget from a background thread: everything goes
-through a plain thread-safe `queue.Queue` (`IloApp._ui_queue`), drained by
-a self-rescheduling `root.after()` loop that only ever runs on the main
-thread (`_pump_ui_queue`). If you add new background-thread callbacks to
-`gui.py`, route them through `self._ui_call(fn)`, not `root.after()`
-directly.
-
-There's a second, separate Tkinter oddity that was chased for a while
-before switching primary effort to the web client: a `Canvas` gridded with
-`sticky="nsew"` inside similarly-stretching parent frames did not reliably
-display `create_image`/`itemconfig` updates on this machine, even though
-the underlying `PIL.Image` was independently verified correct (dumped to
-PNG and inspected -- pixel-perfect). Root cause not fully pinned down; the
-web client (a plain `<canvas>` + JPEG blobs) sidesteps it entirely and
-doesn't have the problem, which is the main reason it's the recommended
-client. If you want to debug the Tkinter path further,
-`IloApp._maybe_dump_debug_png()` (saves `debug_frame.png` in the repo
-root, gitignored) is a quick way to check "is the data right, independent
-of Tkinter rendering" again.
+An early version of this project had a Tkinter desktop client alongside
+the web one, sharing the same `ilo2/` backend. It's gone now (the web
+client covers the same ground and is what's actually used), but the
+reasons it was dropped are worth knowing if a native client ever comes
+back into scope: two separate macOS/Aqua-Tk-specific bugs cost real
+debugging time before switching primary effort to the browser client --
+(1) `root.after(0, fn)` scheduled from a background thread (login, the
+console's receiver thread, and RIBCL calls all ran off the main thread)
+silently no-opped instead of raising or running, so UI updates pushed from
+those threads just never appeared, with no exception to point at the
+problem; (2) separately, a `Canvas` inside stretching/`sticky="nsew"`
+parent frames did not reliably display `create_image`/`itemconfig`
+updates on that machine, even though the underlying `PIL.Image` was
+independently verified pixel-correct (dumped to PNG and inspected). Root
+cause of the second one was never fully pinned down. The web client (a
+plain `<canvas>` + JPEG blobs pushed over a WebSocket) doesn't have either
+problem.
 
 ### Keyboard layout (web client)
 
-`KeyboardEvent.key` is localized to the browser's/OS's active keyboard
-layout; sending it straight through means an Italian (or any non-US)
-keyboard produces wrong characters remotely, since BIOS/OS console input
-over this protocol is effectively always expecting US-QWERTY (this is also
-why the original Java applet shipped its own `LocaleTranslator`).
-`web/index.html` instead reads `KeyboardEvent.code` (the physical key
-position, layout-independent) and maps it through an explicit `US_LAYOUT`
-table. `Ctrl`+letter is special-cased to send the corresponding ASCII
-control code (`0x01`-`0x1A`) instead. Named/navigation keys (arrows,
-F-keys, Enter, etc.) still come from `e.key`, which is fine for those --
-they're not affected by layout.
+This protocol sends interpreted bytes/characters over the wire, not
+physical scancodes (unlike a real hardware KVM) -- so the correct thing to
+send is whatever character the user's own keyboard layout actually
+produces, i.e. `KeyboardEvent.key`, not the physical key position.
+
+The first version of this got that backwards: it read
+`KeyboardEvent.code` (the physical key, layout-independent) through a
+hardcoded `US_LAYOUT` table, on the theory that BIOS/console input
+"expects US-QWERTY" the way a real scancode-based KVM would. That's true
+for letters (QWERTY layouts agree on those) but wrong for punctuation --
+`.code` is purely positional, so on a non-US layout it does not report
+what the key actually produces. On an Italian keyboard this sent
+confidently *wrong* symbols, occasionally swapping two outright (the key
+an Italian user reaches for "?" sits at the same physical position as US
+`Minus`, whose table entry is `_`, so "?" arrived as "_" and vice versa).
+
+Current behavior in `web/index.html::keyToBytes()`: try `e.key` first
+(already resolved against the user's real active layout); fall back to
+the `US_LAYOUT`/`e.code` table only when `e.key` isn't a usable single
+character (some browsers/keys). `Ctrl`+letter is special-cased to send the
+corresponding ASCII control code (`0x01`-`0x1A`) instead of either path.
+Named/navigation keys (arrows, F-keys, Enter, etc.) come from `e.key` too,
+which is fine for those -- they're not affected by layout. The mobile
+on-screen-keyboard path is separate again (see ARCHITECTURE.md) since
+touch IMEs often don't fire useful `KeyboardEvent.code`/`.key` at all.
 
 ### Concurrent console-connect races
 
