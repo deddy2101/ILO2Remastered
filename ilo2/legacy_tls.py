@@ -25,8 +25,16 @@ def _connect(host, port, timeout):
     # even at SECLEVEL=0 because iLO2 doesn't support RFC5746 secure
     # renegotiation ("unsafe legacy renegotiation disabled"). Both have to
     # be relaxed explicitly on OpenSSL 3.x clients; older OpenSSL 1.1
-    # builds allowed this by default.
-    ctx.set_ciphers(f"{_CIPHER}@SECLEVEL=0")
+    # builds allowed this by default. The "@SECLEVEL=0" cipher-string
+    # suffix is an OpenSSL-ism, though: LibreSSL's cipher-string parser
+    # (macOS's system Python, at least through 3.9) doesn't understand it
+    # and rejects the whole string ("No cipher can be selected"), so fall
+    # back to the plain cipher name there -- LibreSSL never needed the
+    # security-level relaxation in the first place.
+    try:
+        ctx.set_ciphers(f"{_CIPHER}@SECLEVEL=0")
+    except ssl.SSLError:
+        ctx.set_ciphers(_CIPHER)
     ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
     raw = socket.create_connection((host, port), timeout=timeout)
     return ctx.wrap_socket(raw, server_hostname=host)

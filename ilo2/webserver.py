@@ -11,6 +11,7 @@ import http.server
 import json
 import queue
 import socket
+import struct
 import threading
 import time
 from pathlib import Path
@@ -27,6 +28,17 @@ from .framebuffer import FrameBuffer
 from .session import IloSession, SessionExhaustedError
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+_FRAME_HEADER = struct.Struct("!HHHH")  # x, y, w, h -- a rect, not a bitmask
+
+
+def _pack_frame(x, y, w, h, jpeg_bytes):
+    """Wire format for a video update, full-frame or partial alike: an
+    8-byte (x, y, w, h) header followed by that rect's JPEG bytes. The
+    client always just draws the JPEG at (x, y) -- a full frame is simply
+    the special case x == y == 0 and (w, h) covering the whole canvas, no
+    separate "is this a keyframe" flag needed on either side."""
+    return _FRAME_HEADER.pack(x, y, w, h) + jpeg_bytes
 
 
 class _AuthenticatedHandler(http.server.SimpleHTTPRequestHandler):
@@ -131,7 +143,6 @@ class WebServer:
         self.console = None
         self.clients = set()
         self._event_queue = queue.Queue()
-        self._last_sent_version = -1
         self._connecting = threading.Lock()
         self._last_status = None
         self._server_info = None
@@ -307,6 +318,12 @@ class WebServer:
         return connection.respond(401, "Unauthorized\n")
 
     async def _ws_handler(self, websocket):
+        # Send this client its keyframe *before* it's in self.clients, so
+        # the broadcast loop can never interleave a dirty-diff (computed
+        # against state this client hasn't seen yet) ahead of it.
+        full = self.fb.full_snapshot()
+        if full is not None:
+            await websocket.send(_pack_frame(*full))
         self.clients.add(websocket)
         self.log(f"Client web connesso ({len(self.clients)} totali)")
         if self._server_info is not None:
@@ -375,14 +392,10 @@ class WebServer:
     async def _broadcast_loop(self):
         while True:
             await asyncio.sleep(0.1)
-            if not self.clients:
-                continue
-            v = self.fb.version
-            if v != self._last_sent_version:
-                self._last_sent_version = v
-                data = self.fb.jpeg_snapshot()
-                if data:
-                    await self._broadcast(data)
+            if self.clients:
+                update = self.fb.take_update()
+                if update is not None:
+                    await self._broadcast(_pack_frame(*update))
             # drain queued log/state events regardless of frame changes
             events = []
             while True:

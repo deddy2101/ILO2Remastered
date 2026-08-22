@@ -3,11 +3,22 @@
 ## Setup
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate   # optional but recommended
+python3 -m venv .venv && source .venv/bin/activate   # see the note below before skipping this
 python3 -m pip install -r requirements.txt
 cp .env.example .env
 $EDITOR .env   # set ILO_HOST / ILO_USER / ILO_PASSWORD
 ```
+
+**On macOS, use a real Python, not the system one.** `/usr/bin/python3`
+(and Xcode's bundled Python) links against an ancient LibreSSL
+(2.8.3 at last check) whose cipher-string parser doesn't understand the
+`@SECLEVEL=0` suffix `legacy_tls.py` needs for the TLS handshake (see
+below) -- `ssl.SSLContext.set_ciphers()` raises `SSLError: No cipher can
+be selected`. The code falls back gracefully when that happens, but the
+LibreSSL build this was tested against is old enough it may have other
+undiscovered quirks too, so prefer a Homebrew (or pyenv, or python.org)
+Python for `.venv` -- `python3 -m ssl` (or `python3 -c "import ssl;
+print(ssl.OPENSSL_VERSION)"`) should say `OpenSSL 3.x`, not `LibreSSL`.
 
 ```bash
 python3 webmain.py            # http://localhost:8080/

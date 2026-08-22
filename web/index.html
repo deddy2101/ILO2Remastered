@@ -289,14 +289,21 @@ function connect() {
       try { handleJsonMessage(JSON.parse(ev.data)); } catch (e) {}
       return;
     }
-    const blob = new Blob([ev.data], { type: 'image/jpeg' });
+    // Wire format: 8-byte header (x, y, w, h as big-endian uint16) then
+    // that rect's JPEG bytes. A full frame is just the case x=y=0 with
+    // (w, h) covering the whole canvas -- same draw path as a partial
+    // dirty-rect update, no separate message type needed.
+    const header = new DataView(ev.data, 0, 8);
+    const x = header.getUint16(0), y = header.getUint16(2);
+    const w = header.getUint16(4), h = header.getUint16(6);
+    const blob = new Blob([ev.data.slice(8)], { type: 'image/jpeg' });
     const bitmap = await createImageBitmap(blob);
-    if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
+    if (x === 0 && y === 0 && (canvas.width !== w || canvas.height !== h)) {
+      canvas.width = w;
+      canvas.height = h;
       resetZoom(); // old pan/zoom no longer makes sense against a new size
     }
-    ctx.drawImage(bitmap, 0, 0);
+    ctx.drawImage(bitmap, x, y);
     setVideoOverlay(null); // a real frame arrived, so there's definitely a live picture
   };
 }

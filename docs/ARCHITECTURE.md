@@ -133,12 +133,25 @@ re-keying.
 
 ## `ilo2/framebuffer.py`
 
-`FrameBuffer` is a thread-safe `PIL.Image` with a version counter and a
-`jpeg_snapshot()` method. It exists so `console.py` doesn't need to know or
-care who's watching -- `webserver.py` polls it on a timer and re-encodes to
-JPEG for whatever browsers are currently connected. Nothing about it is
-web-specific; a different consumer could hang an encoder or a different
-renderer off the same seam.
+`FrameBuffer` is a thread-safe `PIL.Image` that also tracks *what changed*,
+not just *that* something changed -- `paste_block()` grows a single dirty
+bounding-box rectangle (not a per-tile list; see the module docstring for
+why one rect is enough here) instead of just bumping a version counter.
+Two ways to read it back:
+
+- `take_update()`: single-consumer, clears the dirty rect (or, right after
+  a `resize()`, sends the whole frame once instead -- old dirty tracking
+  is meaningless against a brand new image). Returns `None` when nothing
+  changed since the last call. This is what the periodic broadcast loop
+  polls.
+- `full_snapshot()`: always the whole current frame, independent of (and
+  without disturbing) the dirty tracking above. This is what a
+  newly-connected client gets once, so it has a base to draw incremental
+  updates onto.
+
+Both return `(x, y, w, h, jpeg_bytes)`. Nothing about any of this is
+web-specific -- a different consumer could hang a different renderer, or a
+real encoder, off the same seam.
 
 ## `ilo2/dotenv.py`
 
@@ -172,10 +185,13 @@ are both set (unset by default -- LAN-only use needs none of this):
   serving `web/` as static files, gating `/` and `/index.html` behind the
   session cookie when auth is enabled (see `auth.py`), plus `/api/login`
   and `/api/logout`
-- runs a `websockets` server; each connected browser gets pushed JPEG
-  frame snapshots (only when the frame buffer's version has changed) and
-  queued log/status/state events, and can send back JSON control messages.
-  When auth is enabled, `process_request` (`_check_ws_auth`) rejects the
+- runs a `websockets` server; each connecting browser gets one full-frame
+  keyframe (`FrameBuffer.full_snapshot()`), then only dirty-rect updates
+  (`FrameBuffer.take_update()`, polled every 100ms) after that -- see
+  `_pack_frame`/the message-shapes table below. Log/status/state events go
+  out the same socket as JSON text frames. Clients can send back JSON
+  control messages. When auth is enabled, `process_request`
+  (`_check_ws_auth`) rejects the
   handshake outright (HTTP 401, never upgrades) for a missing/invalid
   session cookie -- the WebSocket is a separate port from the HTML page,
   so it needs its own enforcement, not just a login screen in front of the
@@ -239,8 +255,13 @@ Message shapes, client → server (JSON text frames):
 {"type": "uid", "action": "on"|"off"}
 ```
 
-Server → client: binary frames are raw JPEG bytes; text frames are JSON
-with a `type` of `log`, `info` (server name/firmware, sent once), `status`
-(power/UID/health, polled), or `console_state`
+Server → client: binary frames are a video update -- an 8-byte header,
+`x`/`y`/`w`/`h` as big-endian uint16 (`struct.Struct("!HHHH")`), then that
+rect's JPEG bytes. The client always just draws the JPEG at `(x, y)`; a
+full frame is simply `x = y = 0` with `(w, h)` covering the whole canvas
+(triggering a canvas resize), the same code path as any smaller partial
+update -- no separate "is this a keyframe" flag needed on either side.
+Text frames are JSON with a `type` of `log`, `info` (server name/firmware,
+sent once), `status` (power/UID/health, polled), or `console_state`
 (`idle`/`connecting`/`connected`/`disconnected`/`error`/
 `session_exhausted`, plus an optional `detail`).
