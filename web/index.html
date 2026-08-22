@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>iLO2 Remote Console</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font-family: -apple-system, sans-serif; background: #1e1e1e; color: #ddd; display: flex; flex-direction: column; height: 100vh; }
+  #toolbar { display: flex; gap: 6px; padding: 6px; background: #2a2a2a; flex-wrap: wrap; align-items: center; }
+  button { background: #3a3a3a; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #484848; }
+  #status { margin-left: 12px; font-size: 12px; color: #9c9; }
+  #main { flex: 1; display: flex; min-height: 0; }
+  #videoWrap { flex: 1; overflow: auto; background: #000; display: flex; align-items: flex-start; justify-content: flex-start; }
+  canvas { image-rendering: pixelated; outline: none; cursor: crosshair; }
+  #log { width: 420px; background: #000; color: #3f3; font: 12px Menlo, monospace; overflow-y: auto; padding: 6px; box-sizing: border-box; white-space: pre-wrap; word-break: break-all; }
+  #log div { border-bottom: 1px solid #111; padding: 1px 0; }
+</style>
+</head>
+<body>
+  <div id="toolbar">
+    <button id="btnStart">Avvia Console</button>
+    <button id="btnRefresh">Refresh</button>
+    <button id="btnCad">Ctrl+Alt+Del</button>
+    <span style="width:16px"></span>
+    <button id="btnOn">Power On</button>
+    <button id="btnReset">Reset</button>
+    <button id="btnOff">Power Off (graceful)</button>
+    <button id="btnOffHard">Power Off (hold)</button>
+    <span id="status">disconnesso</span>
+  </div>
+  <div id="main">
+    <div id="videoWrap"><canvas id="screen" width="800" height="600" tabindex="0"></canvas></div>
+    <div id="log"></div>
+  </div>
+
+<script>
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+
+function addLog(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+  while (logEl.childElementCount > 500) logEl.removeChild(logEl.firstChild);
+}
+
+const wsUrl = `ws://${location.hostname}:8765/`;
+let ws;
+function connect() {
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { statusEl.textContent = 'connesso al server'; addLog('[ws] connesso a ' + wsUrl); };
+  ws.onclose = () => { statusEl.textContent = 'disconnesso, riconnessione...'; setTimeout(connect, 2000); };
+  ws.onerror = () => {};
+  ws.onmessage = async (ev) => {
+    if (typeof ev.data === 'string') {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'log') addLog(msg.text);
+      } catch (e) {}
+      return;
+    }
+    const blob = new Blob([ev.data], { type: 'image/jpeg' });
+    const bitmap = await createImageBitmap(blob);
+    if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+  };
+}
+connect();
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+document.getElementById('btnStart').onclick = () => send({ type: 'start_console' });
+document.getElementById('btnRefresh').onclick = () => send({ type: 'refresh' });
+document.getElementById('btnCad').onclick = () => send({ type: 'cad' });
+document.getElementById('btnOn').onclick = () => send({ type: 'power', action: 'on' });
+document.getElementById('btnReset').onclick = () => send({ type: 'power', action: 'reset' });
+document.getElementById('btnOff').onclick = () => send({ type: 'power', action: 'off' });
+document.getElementById('btnOffHard').onclick = () => send({ type: 'power', action: 'off_hard' });
+
+// ---- keyboard ----
+canvas.addEventListener('keydown', (e) => {
+  e.preventDefault();
+  const bytes = keyToBytes(e);
+  if (bytes) send({ type: 'key', data: bytes });
+});
+
+const SPECIAL = {
+  Escape: [0x1b], Tab: [9], Enter: [13], Backspace: [8], Delete: [127],
+  Home: [0x1b, 0x5b, 0x48], End: [0x1b, 0x5b, 0x46],
+  PageUp: [0x1b, 0x5b, 0x49], PageDown: [0x1b, 0x5b, 0x47],
+  Insert: [0x1b, 0x5b, 0x4c],
+  ArrowUp: [0x1b, 0x5b, 0x41], ArrowDown: [0x1b, 0x5b, 0x42],
+  ArrowLeft: [0x1b, 0x5b, 0x44], ArrowRight: [0x1b, 0x5b, 0x43],
+  F1: [0x1b,0x5b,0x4d], F2: [0x1b,0x5b,0x4e], F3: [0x1b,0x5b,0x4f], F4: [0x1b,0x5b,0x50],
+  F5: [0x1b,0x5b,0x51], F6: [0x1b,0x5b,0x52], F7: [0x1b,0x5b,0x53], F8: [0x1b,0x5b,0x54],
+  F9: [0x1b,0x5b,0x55], F10: [0x1b,0x5b,0x56], F11: [0x1b,0x5b,0x57], F12: [0x1b,0x5b,0x58],
+};
+
+// The remote BIOS/console expects US-QWERTY input regardless of the
+// physical/OS keyboard layout in use here (this is standard for
+// BIOS-level input and is also why HP's original Java applet shipped its
+// own "LocaleTranslator"). Using e.code (the physical key position, layout
+// independent) instead of e.key (the localized character) sidesteps the
+// whole locale problem: an Italian keyboard's "M" key is still KeyM.
+const US_LAYOUT = {
+  KeyA:['a','A'], KeyB:['b','B'], KeyC:['c','C'], KeyD:['d','D'], KeyE:['e','E'],
+  KeyF:['f','F'], KeyG:['g','G'], KeyH:['h','H'], KeyI:['i','I'], KeyJ:['j','J'],
+  KeyK:['k','K'], KeyL:['l','L'], KeyM:['m','M'], KeyN:['n','N'], KeyO:['o','O'],
+  KeyP:['p','P'], KeyQ:['q','Q'], KeyR:['r','R'], KeyS:['s','S'], KeyT:['t','T'],
+  KeyU:['u','U'], KeyV:['v','V'], KeyW:['w','W'], KeyX:['x','X'], KeyY:['y','Y'],
+  KeyZ:['z','Z'],
+  Digit1:['1','!'], Digit2:['2','@'], Digit3:['3','#'], Digit4:['4','$'],
+  Digit5:['5','%'], Digit6:['6','^'], Digit7:['7','&'], Digit8:['8','*'],
+  Digit9:['9','('], Digit0:['0',')'],
+  Minus:['-','_'], Equal:['=','+'],
+  BracketLeft:['[','{'], BracketRight:[']','}'], Backslash:['\\','|'],
+  Semicolon:[';',':'], Quote:["'",'"'], Backquote:['`','~'],
+  Comma:[',','<'], Period:['.','>'], Slash:['/','?'],
+  Space:[' ',' '],
+};
+
+function keyToBytes(e) {
+  if (e.ctrlKey && !e.altKey && !e.metaKey) {
+    const m = /^Key([A-Z])$/.exec(e.code);
+    if (m) return [m[1].charCodeAt(0) - 64]; // Ctrl+A..Z -> 0x01..0x1A
+  }
+  if (SPECIAL[e.key]) return SPECIAL[e.key];
+  const pair = US_LAYOUT[e.code];
+  if (pair) return [pair[e.shiftKey ? 1 : 0].charCodeAt(0)];
+  if (e.key.length === 1) {
+    const code = e.key.codePointAt(0);
+    if (code < 256) return [code];
+  }
+  return null;
+}
+
+// ---- mouse ----
+let lastX = null, lastY = null;
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
+  const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
+  if (lastX !== null) {
+    const dx = x - lastX, dy = y - lastY;
+    if (dx || dy) send({ type: 'mousemove', dx, dy });
+  }
+  lastX = x; lastY = y;
+});
+const BTN = ['left', 'middle', 'right'];
+canvas.addEventListener('mousedown', (e) => { canvas.focus(); send({ type: 'mousedown', button: BTN[e.button] || 'left' }); });
+canvas.addEventListener('mouseup', (e) => { send({ type: 'mouseup', button: BTN[e.button] || 'left' }); });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+</script>
+</body>
+</html>

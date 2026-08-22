@@ -1,0 +1,208 @@
+# Development notes
+
+## Setup
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate   # optional but recommended
+python3 -m pip install -r requirements.txt
+cp .env.example .env
+$EDITOR .env   # set ILO_HOST / ILO_USER / ILO_PASSWORD
+```
+
+Run the web client (recommended -- see "Tkinter on macOS" below):
+
+```bash
+python3 webmain.py            # http://localhost:8080/
+```
+
+Or the native client:
+
+```bash
+python3 main.py
+```
+
+Both read `.env` automatically (`main.py::load_dotenv`), or take
+`--host`/`--user`/`--password`/etc. on the command line, which override
+`.env`.
+
+## Known iLO2-side quirks
+
+These aren't bugs in this codebase -- they're real behaviors of the actual
+hardware/firmware that cost real debugging time, documented here so they
+don't get re-discovered from scratch.
+
+### `sessionkey="NONEAVAILABLE"` / login suddenly starts failing
+
+iLO2 has a **very small pool of concurrent web-UI sessions** (observed:
+looked like roughly 2-4). Each successful `IloSession.login()` holds a slot
+until it times out server-side (the applet's own default inactivity
+timeout was 900s / 15 min, `remcons.SESSION_TIMEOUT_DEFAULT`) -- there's no
+explicit logout call in this codebase, so **repeated testing without
+waiting leaks sessions and eventually exhausts the pool**. Symptom: `GET /`
+starts returning `sessionkey="NONEAVAILABLE"` and `sessionindex="ffffffff"`
+instead of real values, and `IloSession.login()` raises `LoginError`.
+
+Fix: `IloSession.reset_management_processor()` (RIBCL `RESET_RIB`) reboots
+*just the iLO2 controller* (not the host server), clearing all its
+sessions in ~30-60s. **RIBCL keeps working during this exhaustion** (it's
+a separate, per-request auth path, not tied to the web session pool), so
+this recovery is always available even when the web UI itself is locked
+out. Poll `nc -z host 443` in a loop until it comes back up.
+
+### Console connect gets `ConnectionRefusedError` on port 23
+
+`fetch_console_params()` only arms the port-23 listener for a short window
+(single-digit seconds, empirically). If a connect attempt lands outside
+that window, it's refused. This isn't a real error -- just redo
+`login()` → `fetch_console_params()` → `IloConsole.connect()` fresh; don't
+reuse old `params`.
+
+### `rcseize_rcinuse=1` / `INFOA`/`B`/`C`/`D` come back empty
+
+The Remote Console only allows one active KVM session at a time. If
+`fetch_console_params()`'s HTML shows `rcseize_rcinuse=1`, someone (or a
+leftover connection of your own from earlier testing that never called
+`disconnect()`) already has it, and you won't get real encryption keys.
+`reset_management_processor()` also clears this, same as above.
+
+### `IloConsole.on_status_text("text", "No Video")`
+
+This means iLO2's video-capture hardware genuinely isn't detecting a
+signal right now -- it's the correct, honest report, not a decode failure
+(the decoder still runs cleanly through the whole state machine; it just
+resolves `screen_x`/`screen_y` to 0). Real-world causes we hit while
+building this:
+
+- The host's *primary display* is set to a discrete PCIe GPU in BIOS
+  RBSU (`Advanced Options → Advanced Video Options → Video Boot
+  Priority`/`Embedded Video`) instead of the onboard chip iLO2 actually
+  taps. Symptom persists across OS reboots since it's set at POST, before
+  any OS loads. Fix is physical: `Embedded Video = Primary`, `Optional
+  Video = Secondary` in RBSU (press F9 at the HP splash screen).
+- Separately, an NVIDIA card running its proprietary driver **explicitly
+  disables legacy VGA decode on itself** once `nvidia-drm`/`nvidia-modeset`
+  load (`dmesg` shows `vgaarb: VGA decodes changed: ... decodes=none`).
+  If that GPU is also the BIOS-primary display, you'll see BIOS/GRUB/early
+  kernel messages over iLO (before the driver loads) and then it'll go
+  dark again once the OS finishes booting -- expected, not a regression.
+  There's no supported way to keep the proprietary driver loaded *and*
+  keep that card's legacy VGA output alive; if you need persistent OS
+  console video over iLO with a discrete GPU installed, the onboard chip
+  needs to be the BIOS-primary display, not the discrete card.
+
+### iLO2 holds connections open for ~9s after finishing a response
+
+Confirmed by testing: even though the HTTP response body is fully sent,
+iLO2 doesn't close (or send more data on) the TCP connection for several
+seconds afterward. A naive "read until the socket times out or closes"
+client (the first version of `legacy_tls.raw_request`) pays that full
+delay on *every single request*, which added up to real, user-visible
+slowness (a full login + console-params fetch took ~30s). Fixed by
+detecting response completion from the HTTP framing itself
+(`Content-Length` or the chunked terminator) and returning immediately --
+see `_response_complete`/`_chunked_body_complete` in `legacy_tls.py`. Not
+using a substring search for the chunked terminator (`b"0\r\n\r\n"`)
+matters: that exact byte sequence can legitimately appear inside chunk
+*data*, which caused real, silent response truncation before it was fixed
+to actually walk the chunk framing.
+
+### The web server sometimes fully hangs (ports 80/443 stop responding, ICMP still fine)
+
+Seen once after a long day of repeated automated testing: `ping` kept
+working but `nc -z host 443` (and 80) just refused/timed out, RIBCL
+included, while the box's own SSH stayed reachable. This looks like the
+embedded HTTP server thread pool wedging under sustained load rather than
+anything specific to this client. No clean recovery found other than
+waiting it out or a full power cycle of the *host* (which also resets
+iLO2 since it's on the same board, though iLO2 itself is normally on
+standby power and shouldn't need the host to be power-cycled for a
+`RESET_RIB`-style recovery -- this was a harder hang than the
+session-exhaustion case above, where RIBCL still worked). If you're
+scripting bulk testing against real hardware, add real backoff/pacing;
+this box does not appreciate being hammered.
+
+## Codebase-side gotchas
+
+### Tkinter on macOS and cross-thread `.after()`
+
+`ilo2/gui.py`'s login/console/RIBCL calls all run on background threads.
+Early versions called `root.after(0, fn)` directly from those threads to
+push UI updates (append a log line, resize the canvas). **This silently
+did nothing on this machine's macOS/Aqua Tk build** -- no exception, the
+scheduled callback just never ran. This is why the on-screen log stayed
+empty even though the underlying connection was progressing fine (visible
+only via `print()` to the terminal). Fixed by never touching
+`root.after()`/any Tk widget from a background thread: everything goes
+through a plain thread-safe `queue.Queue` (`IloApp._ui_queue`), drained by
+a self-rescheduling `root.after()` loop that only ever runs on the main
+thread (`_pump_ui_queue`). If you add new background-thread callbacks to
+`gui.py`, route them through `self._ui_call(fn)`, not `root.after()`
+directly.
+
+There's a second, separate Tkinter oddity that was chased for a while
+before switching primary effort to the web client: a `Canvas` gridded with
+`sticky="nsew"` inside similarly-stretching parent frames did not reliably
+display `create_image`/`itemconfig` updates on this machine, even though
+the underlying `PIL.Image` was independently verified correct (dumped to
+PNG and inspected -- pixel-perfect). Root cause not fully pinned down; the
+web client (a plain `<canvas>` + JPEG blobs) sidesteps it entirely and
+doesn't have the problem, which is the main reason it's the recommended
+client. If you want to debug the Tkinter path further,
+`IloApp._maybe_dump_debug_png()` (saves `debug_frame.png` in the repo
+root, gitignored) is a quick way to check "is the data right, independent
+of Tkinter rendering" again.
+
+### Keyboard layout (web client)
+
+`KeyboardEvent.key` is localized to the browser's/OS's active keyboard
+layout; sending it straight through means an Italian (or any non-US)
+keyboard produces wrong characters remotely, since BIOS/OS console input
+over this protocol is effectively always expecting US-QWERTY (this is also
+why the original Java applet shipped its own `LocaleTranslator`).
+`web/index.html` instead reads `KeyboardEvent.code` (the physical key
+position, layout-independent) and maps it through an explicit `US_LAYOUT`
+table. `Ctrl`+letter is special-cased to send the corresponding ASCII
+control code (`0x01`-`0x1A`) instead. Named/navigation keys (arrows,
+F-keys, Enter, etc.) still come from `e.key`, which is fine for those --
+they're not affected by layout.
+
+### Concurrent console-connect races
+
+`ilo2/webserver.py::WebServer` auto-starts the console on boot; a user
+clicking "Avvia Console" in the browser at the same moment used to fire a
+*second*, concurrent `_connect_worker()`. Since `sessionkey` is single-use,
+whichever request fetched its key second would invalidate the first's,
+and one of the two logins would fail with a confusing
+`LoginError('login rejected...')` that had nothing to do with credentials.
+Fixed with `WebServer._connecting`, a non-blocking `threading.Lock` used
+purely as a guard (`acquire(blocking=False)` / `release()` in `finally`)
+-- a second concurrent start request just logs and no-ops instead of
+racing.
+
+## What's not implemented
+
+- **Absolute/high-performance mouse mode.** Only the simple relative-move
+  protocol (`mouse_protocol == 0`) is implemented. The original applet's
+  `MouseSync` class does server-side cursor position reconciliation for a
+  second, higher-fidelity mode that wasn't ported.
+- **Full special-key table.** Shift/Ctrl/Alt-modified variants of
+  Home/End/PgUp/PgDn/Insert/F-keys beyond plain presses aren't mapped (see
+  `cim.translate_special_key()` in the decompiled applet source if you
+  need a specific one -- PROTOCOL.md §7 explains how to get back to that
+  source).
+- **Locale-aware keyboard translation matching the original
+  `LocaleTranslator`.** The "treat every physical key as US-QWERTY"
+  approach (PROTOCOL.md/this file, keyboard layout section) is a simpler,
+  different fix for the same underlying problem and works fine for
+  BIOS/console use, but isn't a port of the original class.
+- **Real video encoding (H.264/HLS).** The web client currently pushes
+  periodic full-frame JPEG snapshots over the WebSocket, not a proper
+  video stream. Good enough for a live console view; if you need this
+  behind a real media pipeline, `ilo2/framebuffer.py::FrameBuffer` is
+  already the right seam to hang an encoder off (it's just a thread-safe
+  `PIL.Image` plus a version counter -- swap or wrap
+  `jpeg_snapshot()`/consume the paste-events differently).
+- **Session logout.** Nothing calls a web-UI logout endpoint, which is
+  part of why session exhaustion happens under repeated testing (see
+  above). Worth adding if you're scripting a lot of connect/disconnect
+  cycles.
