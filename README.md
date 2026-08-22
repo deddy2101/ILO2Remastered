@@ -123,3 +123,7 @@ already have, over protocols the vendor's own client used — it's a
 client-side reimplementation for interoperability with your own device,
 not an attack against anything. Don't point it at hardware you don't have
 authorization to manage.
+
+## 📄 License
+
+[MIT](LICENSE).
