@@ -562,6 +562,15 @@ function keyToBytes(e) {
 const mobileKbInput = document.getElementById('mobileKbInput');
 const btnKb = document.getElementById('btnKb');
 let kbActive = false;
+// A plain click on a <button> focuses it by default -- which, while the
+// keyboard is on, blurs mobileKbInput *before* this handler even runs.
+// That fires the blur listener below (kbActive = false) first, and then
+// onclick's own toggle negates *that*: false -> true, flipping it right
+// back on. Net effect: clicking to turn the keyboard off never worked,
+// it just silently re-enabled itself. Stopping mousedown's default keeps
+// focus on mobileKbInput so only this handler's own kbActive = false
+// (the intended path) ever runs.
+btnKb.addEventListener('mousedown', (e) => e.preventDefault());
 btnKb.onclick = () => {
   kbActive = !kbActive;
   btnKb.classList.toggle('toggled', kbActive);
@@ -641,7 +650,21 @@ function pinchGeometry() {
 }
 
 canvas.addEventListener('pointerdown', (e) => {
-  canvas.focus();
+  // Stealing focus onto the canvas is what a physical keyboard needs (its
+  // keydown listener is bound here) -- but on a phone, with the on-screen
+  // keyboard toggled on, mobileKbInput is the focused element keeping that
+  // keyboard open, and *any* focus change away from it blurs it, silently
+  // dismissing the on-screen keyboard on every tap-to-move-the-cursor.
+  // Not calling canvas.focus() ourselves isn't enough -- a pointerdown on
+  // a focusable (tabindex) element focuses it by default regardless, so
+  // that default has to be suppressed too. Pointer events still fire on
+  // canvas either way (they don't need focus), so mouse/touch handling
+  // below is unaffected.
+  if (kbActive) {
+    e.preventDefault();
+  } else {
+    canvas.focus();
+  }
   try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* e.g. pointer already gone */ }
   activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
