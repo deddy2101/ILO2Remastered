@@ -1,11 +1,21 @@
 """HP iLO2 web login + RIBCL power control + Remote Console parameter fetch."""
 import base64
 import re
+import xml.etree.ElementTree as ET
 
 from . import legacy_tls
 
 
 class LoginError(Exception):
+    pass
+
+
+class SessionExhaustedError(LoginError):
+    """iLO2's web-UI session pool (observed: ~2-4 slots) is full --
+    sessionkey="NONEAVAILABLE" on the login page. RIBCL calls (power,
+    health, UID) are unaffected, since they use a separate per-request
+    auth path; only the web-UI/Remote-Console login is blocked until a
+    slot frees up or reset_management_processor() clears the pool."""
     pass
 
 
@@ -33,6 +43,9 @@ class IloSession:
         if not m_key or not m_idx:
             raise LoginError("could not find sessionkey on login page")
         key, idx = m_key.group(1), m_idx.group(1)
+        if key == "NONEAVAILABLE":
+            raise SessionExhaustedError(
+                "iLO2 web-UI session pool exhausted (sessionkey=NONEAVAILABLE)")
 
         token = f"{idx}:{self._b64(self.username)}:{self._b64(self.password)}:{key}"
         raw2 = legacy_tls.raw_request(
@@ -120,3 +133,95 @@ class IloSession:
         session pool is tiny and each login holds a slot until it times out.
         The iLO2 web UI/console is unreachable for ~30-60s afterwards."""
         return self._ribcl('<RIB_INFO MODE="write"><RESET_RIB/></RIB_INFO>')
+
+    # ---- UID (blue "locate" LED) ----------------------------------------
+    def get_uid_status(self):
+        resp = self._ribcl('<SERVER_INFO MODE="read"><GET_UID_STATUS/></SERVER_INFO>')
+        m = re.search(r'GET_UID_STATUS UID="(\w+)"', resp)
+        return m.group(1) if m else None
+
+    def uid_on(self):
+        return self._ribcl('<SERVER_INFO MODE="write"><UID_CONTROL UID="Yes"/></SERVER_INFO>')
+
+    def uid_off(self):
+        return self._ribcl('<SERVER_INFO MODE="write"><UID_CONTROL UID="No"/></SERVER_INFO>')
+
+    # ---- identity ---------------------------------------------------------
+    def get_fw_version(self):
+        resp = self._ribcl('<RIB_INFO MODE="read"><GET_FW_VERSION/></RIB_INFO>')
+        m = re.search(r"<GET_FW_VERSION\s+([^/]*)/>", resp, re.DOTALL)
+        if not m:
+            return {}
+        attrs = dict(re.findall(r'(\w+)\s*=\s*"([^"]*)"', m.group(1)))
+        return {
+            "firmware_version": attrs.get("FIRMWARE_VERSION"),
+            "firmware_date": attrs.get("FIRMWARE_DATE"),
+            "management_processor": attrs.get("MANAGEMENT_PROCESSOR"),
+            "license_type": attrs.get("LICENSE_TYPE"),
+        }
+
+    def get_server_name(self):
+        resp = self._ribcl('<SERVER_INFO MODE="read"><GET_SERVER_NAME/></SERVER_INFO>')
+        m = re.search(r'SERVER_NAME VALUE="([^"]*)"', resp)
+        return m.group(1) if m else None
+
+    # ---- embedded health (fans, temps, PSUs) -------------------------------
+    @staticmethod
+    def _extract_block(resp, tag):
+        """RIBCL responses are several concatenated `<?xml?><RIBCL>...</RIBCL>`
+        documents (one ack per element iLO2's streaming parser processes),
+        not one well-formed document -- so pull out just the `<TAG>...</TAG>`
+        fragment we care about and parse *that* on its own."""
+        m = re.search(rf"<{tag}[ >].*?</{tag}>", resp, re.DOTALL)
+        if not m:
+            return None
+        try:
+            return ET.fromstring(m.group(0))
+        except ET.ParseError:
+            return None
+
+    def get_embedded_health(self):
+        resp = self._ribcl('<SERVER_INFO MODE="read"><GET_EMBEDDED_HEALTH/></SERVER_INFO>')
+        root = self._extract_block(resp, "GET_EMBEDDED_HEALTH_DATA")
+        if root is None:
+            return {"fans": [], "temperatures": [], "power_supplies": [], "summary": {}}
+
+        fans = [{
+            "label": fan.find("LABEL").get("VALUE"),
+            "zone": fan.find("ZONE").get("VALUE"),
+            "status": fan.find("STATUS").get("VALUE"),
+            "speed": fan.find("SPEED").get("VALUE"),
+        } for fan in root.findall("./FANS/FAN")]
+
+        temperatures = []
+        for temp in root.findall("./TEMPERATURE/TEMP"):
+            reading = temp.find("CURRENTREADING")
+            if reading is None or reading.get("VALUE") == "N/A":
+                continue
+            temperatures.append({
+                "label": temp.find("LABEL").get("VALUE"),
+                "location": temp.find("LOCATION").get("VALUE"),
+                "status": temp.find("STATUS").get("VALUE"),
+                "current": reading.get("VALUE"),
+                "caution": temp.find("CAUTION").get("VALUE") if temp.find("CAUTION") is not None else None,
+                "critical": temp.find("CRITICAL").get("VALUE") if temp.find("CRITICAL") is not None else None,
+            })
+
+        power_supplies = [{
+            "label": psu.find("LABEL").get("VALUE"),
+            "status": psu.find("STATUS").get("VALUE"),
+        } for psu in root.findall("./POWER_SUPPLIES/SUPPLY")]
+
+        summary = {}
+        for el in root.findall("./HEALTH_AT_A_GLANCE/*"):
+            key = el.tag.lower()
+            for attr_name, attr_val in el.attrib.items():
+                summary_key = key if attr_name == "STATUS" else f"{key}_{attr_name.lower()}"
+                summary[summary_key] = attr_val
+
+        return {
+            "fans": fans,
+            "temperatures": temperatures,
+            "power_supplies": power_supplies,
+            "summary": summary,
+        }

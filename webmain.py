@@ -13,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 
-from main import load_dotenv
+from ilo2.dotenv import load_dotenv
 from ilo2.webserver import main as run_webserver
 
 

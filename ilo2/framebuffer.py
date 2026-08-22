@@ -19,6 +19,14 @@ class FrameBuffer:
 
     def resize(self, w, h):
         with self._lock:
+            # A same-size resize is a no-op for us but not necessarily rare
+            # upstream (iLO2 can re-announce the mode, and a DVC decoder
+            # desync/resync can also misfire this): recreating the image
+            # would wipe every block painted so far for no reason, which
+            # looks exactly like "the video blanks out and only the parts
+            # that get redrawn afterward reappear."
+            if self._image is not None and self._image.size == (w, h):
+                return
             self._image = Image.new("RGB", (w, h), "black")
             self._version += 1
 
@@ -45,7 +53,7 @@ class FrameBuffer:
         with self._lock:
             return self._image.size if self._image else (0, 0)
 
-    def jpeg_snapshot(self, quality=80) -> bytes:
+    def jpeg_snapshot(self, quality=92) -> bytes:
         with self._lock:
             if self._image is None:
                 return b""

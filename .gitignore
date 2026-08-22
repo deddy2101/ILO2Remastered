@@ -1,7 +1,6 @@
 .env
 __pycache__/
 *.pyc
-debug_frame.png
-*.png
+/debug_frame.png
 .venv/
 venv/

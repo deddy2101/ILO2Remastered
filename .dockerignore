@@ -1,0 +1,9 @@
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+debug_frame.png
+docs/
+main.py

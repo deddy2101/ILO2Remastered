@@ -9,6 +9,7 @@ otherwise unremarkable.
 """
 import socket
 import ssl
+import time
 
 _CIPHER = "AES128-SHA"  # RSA key exchange only -- avoids the DHE hang
 
@@ -19,7 +20,14 @@ def _connect(host, port, timeout):
     ctx.verify_mode = ssl.CERT_NONE
     ctx.minimum_version = ssl.TLSVersion.TLSv1
     ctx.maximum_version = ssl.TLSVersion.TLSv1
-    ctx.set_ciphers(_CIPHER)
+    # OpenSSL 3.x's default @SECLEVEL (>=1) refuses TLS1.0 entirely
+    # ("no protocols available"), and separately refuses the handshake
+    # even at SECLEVEL=0 because iLO2 doesn't support RFC5746 secure
+    # renegotiation ("unsafe legacy renegotiation disabled"). Both have to
+    # be relaxed explicitly on OpenSSL 3.x clients; older OpenSSL 1.1
+    # builds allowed this by default.
+    ctx.set_ciphers(f"{_CIPHER}@SECLEVEL=0")
+    ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
     raw = socket.create_connection((host, port), timeout=timeout)
     return ctx.wrap_socket(raw, server_hostname=host)
 
@@ -103,25 +111,42 @@ def raw_request(host, method, path, headers=None, body=None, port=443, timeout=1
     return data
 
 
-def ribcl_raw(host, xml_body: bytes, port=443, timeout=15):
+def ribcl_raw(host, xml_body: bytes, port=443, timeout=15, quiet_period=0.75):
     """Send a RIBCL XML document the old way: raw bytes over the TLS socket,
     no HTTP framing (iLO2 predates the HTTP-wrapped RIBCL that iLO3+ added).
     The '<?xml version="1.0"?>' header must land in its own TCP write,
     separate from the RIBCL body, or the firmware never replies.
+
+    RIBCL's raw framing has no Content-Length/chunked terminator to detect
+    completion from, and iLO2 holds the connection open well after it's
+    done answering (same behavior as raw_request, see PROTOCOL.md) --
+    confirmed by measurement, every single call was blocking for the full
+    `timeout` even though the actual reply arrives almost immediately.
+    So: once the first byte has arrived, treat `quiet_period` with no new
+    data as "response finished" and stop, instead of always waiting out
+    the whole `timeout`. Before any data arrives, still wait the full
+    remaining `timeout` (that part -- connect + iLO2 processing the
+    request -- can legitimately take a while).
     """
     s = _connect(host, port, timeout)
     s.sendall(b'<?xml version="1.0"?>\r\n')
     s.sendall(xml_body)
-    s.settimeout(timeout)
     data = b""
-    try:
-        while True:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        s.settimeout(min(quiet_period, remaining) if data else remaining)
+        try:
             chunk = s.recv(65536)
-            if not chunk:
+        except socket.timeout:
+            if data:
                 break
-            data += chunk
-    except socket.timeout:
-        pass
+            continue
+        if not chunk:
+            break
+        data += chunk
     s.close()
     return data.decode(errors="replace")
 

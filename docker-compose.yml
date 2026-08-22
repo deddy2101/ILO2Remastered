@@ -1,0 +1,10 @@
+services:
+  ilo2remastered:
+    build: .
+    container_name: ilo2remastered
+    restart: unless-stopped
+    ports:
+      - "8180:8080"
+      - "8765:8765"
+    env_file:
+      - .env

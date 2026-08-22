@@ -10,20 +10,112 @@ import functools
 import http.server
 import json
 import queue
+import socket
 import threading
+import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import websockets
 
+from .auth import (
+    SESSION_COOKIE, AuthConfig, LoginRateLimiter, SessionStore,
+    clear_cookie_header, parse_cookies, session_cookie_header,
+)
 from .console import IloConsole
 from .framebuffer import FrameBuffer
-from .session import IloSession
+from .session import IloSession, SessionExhaustedError
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+class _AuthenticatedHandler(http.server.SimpleHTTPRequestHandler):
+    """Static file server that gates the app page behind a session cookie
+    (when WEBAPP_USER/WEBAPP_PASSWORD are set) and handles login/logout.
+    Everything else (manifest, icons, sw.js, the login page itself) stays
+    reachable unauthenticated -- none of it is sensitive on its own, and
+    the login page obviously has to load before anyone can log in."""
+
+    def __init__(self, *args, auth, sessions, rate_limiter, **kwargs):
+        self.auth = auth
+        self.sessions = sessions
+        self.rate_limiter = rate_limiter
+        super().__init__(*args, **kwargs)
+
+    def _is_authenticated(self):
+        if not self.auth.enabled:
+            return True
+        cookies = parse_cookies(self.headers.get("Cookie"))
+        return self.sessions.validate(cookies.get(SESSION_COOKIE))
+
+    def _is_https(self):
+        # TLS terminates at the reverse proxy in front of this process (see
+        # README) -- trust its X-Forwarded-Proto to decide whether the
+        # session cookie can carry Secure. It can't over the plain
+        # http://localhost used for LAN/dev testing, or the browser would
+        # silently refuse to store it and login would never "stick".
+        return self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+
+    def do_GET(self):
+        path = urlsplit(self.path).path
+        if path == "/api/logout":
+            self._handle_logout()
+            return
+        if self.auth.enabled and path in ("/", "/index.html") and not self._is_authenticated():
+            self.send_response(302)
+            self.send_header("Location", "/login.html")
+            self.end_headers()
+            return
+        super().do_GET()
+
+    def do_POST(self):
+        path = urlsplit(self.path).path
+        if path == "/api/login":
+            self._handle_login()
+        elif path == "/api/logout":
+            self._handle_logout()
+        else:
+            self.send_error(404)
+
+    def _handle_login(self):
+        ip = self.client_address[0]
+        if self.rate_limiter.is_locked_out(ip):
+            self.send_response(429)
+            self.send_header("Retry-After", "300")
+            self.end_headers()
+            self.wfile.write(b"Troppi tentativi falliti, riprova tra qualche minuto.\n")
+            return
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length).decode("utf-8", errors="replace")
+        fields = parse_qs(body)
+        user = fields.get("user", [""])[0]
+        password = fields.get("password", [""])[0]
+        if self.auth.check(user, password):
+            self.rate_limiter.record_success(ip)
+            token = self.sessions.create()
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.send_header("Set-Cookie", session_cookie_header(token, secure=self._is_https()))
+            self.end_headers()
+        else:
+            self.rate_limiter.record_failure(ip)
+            self.send_response(302)
+            self.send_header("Location", "/login.html?error=1")
+            self.end_headers()
+
+    def _handle_logout(self):
+        cookies = parse_cookies(self.headers.get("Cookie"))
+        self.sessions.revoke(cookies.get(SESSION_COOKIE))
+        self.send_response(302)
+        self.send_header("Location", "/login.html")
+        self.send_header("Set-Cookie", clear_cookie_header(secure=self._is_https()))
+        self.end_headers()
 
 _MOUSE_LEFT = 4
 _MOUSE_CENTER = 2
 _MOUSE_RIGHT = 1
+
+STATUS_POLL_INTERVAL = 15  # seconds; power/UID/fans/temps don't change fast
 
 
 class WebServer:
@@ -38,14 +130,26 @@ class WebServer:
         self.session = IloSession(host, username, password)
         self.console = None
         self.clients = set()
-        self._log_queue = queue.Queue()
+        self._event_queue = queue.Queue()
         self._last_sent_version = -1
         self._connecting = threading.Lock()
+        self._last_status = None
+        self._server_info = None
+        self.console_state = {"type": "console_state", "state": "idle", "detail": None}
 
-    # ---- logging (thread-safe: just queues, the asyncio side drains it) --
+        self.auth = AuthConfig()
+        self.sessions = SessionStore()
+        self.rate_limiter = LoginRateLimiter()
+
+    # ---- logging / state events (thread-safe: just queues, the asyncio
+    # side drains them) ---------------------------------------------------
     def log(self, msg):
         print(msg, flush=True)
-        self._log_queue.put(str(msg))
+        self._event_queue.put({"type": "log", "text": str(msg)})
+
+    def set_console_state(self, state, detail=None):
+        self.console_state = {"type": "console_state", "state": state, "detail": detail}
+        self._event_queue.put(self.console_state)
 
     # ---- console connection (blocking, runs in its own thread) ----------
     def start_console_thread(self):
@@ -54,44 +158,162 @@ class WebServer:
             return
         threading.Thread(target=self._connect_worker, daemon=True).start()
 
+    def _wait_for_ilo(self, timeout=90):
+        deadline = time.time() + timeout
+        time.sleep(5)  # iLO2 drops connections immediately after RESET_RIB
+        while time.time() < deadline:
+            try:
+                socket.create_connection((self.host, 443), timeout=3).close()
+                return
+            except OSError:
+                time.sleep(3)
+        raise TimeoutError("iLO2 non ha ripreso a rispondere dopo il reset")
+
+    def _on_console_disconnected(self, reason):
+        self.log(f"Disconnesso: {reason}")
+        self.set_console_state("disconnected", reason)
+
     def _connect_worker(self):
+        self.set_console_state("connecting")
         try:
             self.log("Login sulla pagina web dell'iLO2...")
-            self.session.login()
+            try:
+                self.session.login()
+            except SessionExhaustedError:
+                # Don't auto-reset iLO2's management processor: that's a
+                # disruptive action (it reboots the iLO2 controller, ~30-60s
+                # unreachable, kills any other active session too) and
+                # should only happen with the user's explicit OK -- see
+                # "confirm_reset" below.
+                self.log("Pool sessioni iLO2 esaurito (NONEAVAILABLE).")
+                self.set_console_state("session_exhausted")
+                return
             self.log(f"Login ok, sessione: {self.session.session_cookie}")
 
-            self.log("Richiesta pagina Remote Console (arma la porta KVM)...")
-            params = self.session.fetch_console_params()
-            safe = {k: v for k, v in params.items() if k not in ("infob", "infoc")}
-            self.log(f"Parametri console: {safe}")
+            # fetch_console_params() only arms the KVM port for a short,
+            # single-digit-second window -- a connect landing just outside
+            # it gets ConnectionRefusedError, which isn't a real failure,
+            # just redo login+params fresh (see DEVELOPMENT.md).
+            last_err = None
+            for attempt in range(1, 4):
+                try:
+                    self.log("Richiesta pagina Remote Console (arma la porta KVM)...")
+                    params = self.session.fetch_console_params()
+                    safe = {k: v for k, v in params.items() if k not in ("infob", "infoc")}
+                    self.log(f"Parametri console: {safe}")
 
-            self.console = IloConsole(self.host, params, debug=True, log_fn=self.log)
-            self.console.on_frame_block = self.fb.paste_block
-            self.console.on_video_size = lambda w, h: (self.fb.resize(w, h), self.log(f"Dimensione video: {w}x{h}"))
-            self.console.on_status_text = lambda field, text: self.log(f"stato[{field}]: {text}")
-            self.console.on_disconnected = lambda reason: self.log(f"Disconnesso: {reason}")
+                    self.console = IloConsole(self.host, params, debug=True, log_fn=self.log)
+                    self.console.on_frame_block = self.fb.paste_block
+                    self.console.on_video_size = lambda w, h: (
+                        self.fb.resize(w, h), self.log(f"Dimensione video: {w}x{h}"))
+                    self.console.on_status_text = lambda field, text: self.log(f"stato[{field}]: {text}")
+                    self.console.on_disconnected = self._on_console_disconnected
 
-            self.log(f"Apertura socket KVM sulla porta {self.console.port}...")
-            self.console.connect()
-            self.log("Connesso, in attesa del flusso video...")
+                    self.log(f"Apertura socket KVM sulla porta {self.console.port}...")
+                    self.console.connect()
+                    self.log("Connesso, in attesa del flusso video...")
+                    self.set_console_state("connected")
+                    return
+                except ConnectionRefusedError as e:
+                    last_err = e
+                    self.log(f"Porta KVM non armata (tentativo {attempt}/3), rifaccio login e riprovo...")
+                    if attempt < 3:
+                        time.sleep(1.5)
+                        self.session.login()
+            raise last_err
         except Exception as e:
             self.log(f"ERRORE connessione console: {e!r}")
+            self.set_console_state("error", str(e))
         finally:
             self._connecting.release()
 
-    # ---- power controls (blocking RIBCL calls, run off the event loop) --
-    async def _run_power(self, loop, fn, label):
+    async def _confirmed_reset(self, loop):
+        """Only reachable via an explicit "confirm_reset" message from a
+        client, after the user has been shown what it does (see
+        web/index.html's session_exhausted handling)."""
+        self.log("Reset del management processor confermato dall'utente, invio RESET_RIB...")
+        try:
+            await loop.run_in_executor(None, self.session.reset_management_processor)
+            self.log("Reset inviato, attendo che iLO2 torni raggiungibile...")
+            await loop.run_in_executor(None, self._wait_for_ilo)
+            self.log("iLO2 di nuovo raggiungibile.")
+        except Exception as e:
+            self.log(f"Reset FALLITO: {e!r}")
+            self.set_console_state("error", str(e))
+            return
+        self.start_console_thread()
+
+    # ---- power/UID controls (blocking RIBCL calls, run off the event loop) --
+    async def _run_action(self, loop, fn, label):
         self.log(f"{label}: invio comando RIBCL...")
         try:
             await loop.run_in_executor(None, fn)
             self.log(f"{label}: ok")
+            # refresh status right away instead of waiting up to
+            # STATUS_POLL_INTERVAL for the UI to catch up
+            status = await loop.run_in_executor(None, self._poll_status)
+            if status is not None:
+                self._last_status = status
+                await self._broadcast(json.dumps(status))
         except Exception as e:
             self.log(f"{label}: FALLITO: {e!r}")
 
+    # ---- status polling (power/UID/health -- RIBCL, independent of the
+    # console/web-session state, so it works even before "Avvia Console") --
+    def _poll_status(self):
+        """Runs in a worker thread. Returns None (and logs) on failure so a
+        transient RIBCL hiccup doesn't kill the polling loop."""
+        try:
+            health = self.session.get_embedded_health()
+            return {
+                "type": "status",
+                "power": self.session.get_power_status(),
+                "uid": self.session.get_uid_status(),
+                **health,
+            }
+        except Exception as e:
+            self.log(f"Poll stato iLO2 fallito: {e!r}")
+            return None
+
+    async def _status_poll_loop(self):
+        loop = asyncio.get_running_loop()
+        try:
+            info = await loop.run_in_executor(None, self.session.get_fw_version)
+            name = await loop.run_in_executor(None, self.session.get_server_name)
+            self._server_info = {"type": "info", "server_name": name,
+                                  "auth_enabled": self.auth.enabled, **info}
+            await self._broadcast(json.dumps(self._server_info))
+        except Exception as e:
+            self.log(f"Recupero info server fallito: {e!r}")
+        while True:
+            status = await loop.run_in_executor(None, self._poll_status)
+            if status is not None:
+                self._last_status = status
+                await self._broadcast(json.dumps(status))
+            await asyncio.sleep(STATUS_POLL_INTERVAL)
+
     # ---- websocket handling ----------------------------------------
+    def _check_ws_auth(self, connection, request):
+        """`process_request` hook: rejects the handshake outright (HTTP 401,
+        connection never upgrades) for anyone without a valid session
+        cookie. Login gates the HTML page too, but that's a separate port
+        -- without this, the WS data/control channel would stay wide open
+        even with a login screen in front of the page."""
+        if not self.auth.enabled:
+            return None
+        cookies = parse_cookies(request.headers.get("Cookie"))
+        if self.sessions.validate(cookies.get(SESSION_COOKIE)):
+            return None
+        return connection.respond(401, "Unauthorized\n")
+
     async def _ws_handler(self, websocket):
         self.clients.add(websocket)
         self.log(f"Client web connesso ({len(self.clients)} totali)")
+        if self._server_info is not None:
+            await websocket.send(json.dumps(self._server_info))
+        if self._last_status is not None:
+            await websocket.send(json.dumps(self._last_status))
+        await websocket.send(json.dumps(self.console_state))
         loop = asyncio.get_running_loop()
         try:
             async for raw in websocket:
@@ -125,6 +347,8 @@ class WebServer:
             c.send_ctrl_alt_del()
         elif mtype == "start_console":
             self.start_console_thread()
+        elif mtype == "confirm_reset":
+            asyncio.create_task(self._confirmed_reset(loop))
         elif mtype == "power":
             action = msg.get("action")
             fn, label = {
@@ -134,7 +358,15 @@ class WebServer:
                 "reset": (self.session.warm_boot, "Reset"),
             }.get(action, (None, None))
             if fn:
-                asyncio.create_task(self._run_power(loop, fn, label))
+                asyncio.create_task(self._run_action(loop, fn, label))
+        elif mtype == "uid":
+            action = msg.get("action")
+            fn, label = {
+                "on": (self.session.uid_on, "UID On"),
+                "off": (self.session.uid_off, "UID Off"),
+            }.get(action, (None, None))
+            if fn:
+                asyncio.create_task(self._run_action(loop, fn, label))
 
     @staticmethod
     def _button_code(name):
@@ -151,15 +383,15 @@ class WebServer:
                 data = self.fb.jpeg_snapshot()
                 if data:
                     await self._broadcast(data)
-            # drain queued log lines regardless of frame changes
-            lines = []
+            # drain queued log/state events regardless of frame changes
+            events = []
             while True:
                 try:
-                    lines.append(self._log_queue.get_nowait())
+                    events.append(self._event_queue.get_nowait())
                 except queue.Empty:
                     break
-            for line in lines:
-                await self._broadcast(json.dumps({"type": "log", "text": line}))
+            for event in events:
+                await self._broadcast(json.dumps(event))
 
     async def _broadcast(self, payload):
         dead = []
@@ -173,16 +405,26 @@ class WebServer:
 
     # ---- HTTP static file server (plain thread, not asyncio) -----------
     def _start_http_server(self):
-        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(WEB_DIR))
+        handler = functools.partial(
+            _AuthenticatedHandler, directory=str(WEB_DIR),
+            auth=self.auth, sessions=self.sessions, rate_limiter=self.rate_limiter)
         httpd = http.server.ThreadingHTTPServer(("0.0.0.0", self.http_port), handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         self.log(f"Frontend web su http://localhost:{self.http_port}/")
+        if self.auth.enabled:
+            self.log("Autenticazione attiva (WEBAPP_USER/WEBAPP_PASSWORD impostati).")
+        else:
+            self.log("ATTENZIONE: nessuna autenticazione attiva (WEBAPP_USER/"
+                      "WEBAPP_PASSWORD non impostati nell'.env) -- non esporre "
+                      "questa porta su internet così com'è.")
 
     async def run(self):
         self._start_http_server()
         self.log(f"WebSocket su ws://localhost:{self.ws_port}/")
-        async with websockets.serve(self._ws_handler, "0.0.0.0", self.ws_port):
+        async with websockets.serve(self._ws_handler, "0.0.0.0", self.ws_port,
+                                     process_request=self._check_ws_auth):
             self.start_console_thread()
+            asyncio.create_task(self._status_poll_loop())
             await self._broadcast_loop()
 
 

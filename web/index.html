@@ -2,43 +2,262 @@
 <html lang="it">
 <head>
 <meta charset="utf-8">
-<title>iLO2 Remote Console</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d12">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>iLO2 Console</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
 <style>
-  :root { color-scheme: dark; }
-  body { margin: 0; font-family: -apple-system, sans-serif; background: #1e1e1e; color: #ddd; display: flex; flex-direction: column; height: 100vh; }
-  #toolbar { display: flex; gap: 6px; padding: 6px; background: #2a2a2a; flex-wrap: wrap; align-items: center; }
-  button { background: #3a3a3a; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
-  button:hover { background: #484848; }
-  #status { margin-left: 12px; font-size: 12px; color: #9c9; }
-  #main { flex: 1; display: flex; min-height: 0; }
-  #videoWrap { flex: 1; overflow: auto; background: #000; display: flex; align-items: flex-start; justify-content: flex-start; }
-  canvas { image-rendering: pixelated; outline: none; cursor: crosshair; }
-  #log { width: 420px; background: #000; color: #3f3; font: 12px Menlo, monospace; overflow-y: auto; padding: 6px; box-sizing: border-box; white-space: pre-wrap; word-break: break-all; }
-  #log div { border-bottom: 1px solid #111; padding: 1px 0; }
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d12;
+    --surface: #12151c;
+    --surface-2: #181c26;
+    --border: #232838;
+    --text: #e7eaf0;
+    --text-dim: #8a91a3;
+    --accent: #3ea6ff;
+    --accent-dim: #1f4b73;
+    --ok: #38e08c;
+    --warn: #f5b942;
+    --crit: #f0546a;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  button { font: inherit; }
+
+  /* ---- top bar ---- */
+  #topbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; background: var(--surface);
+    border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  #topbar h1 { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; }
+  #topbar .server-name { color: var(--text-dim); font-weight: 400; }
+  #topbar .spacer { flex: 1; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 5px 12px; font-size: 12.5px; white-space: nowrap;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: none; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.crit { background: var(--crit); box-shadow: 0 0 8px var(--crit); }
+  .dot.pulse { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  #uidPill { cursor: pointer; border: 1px solid var(--border); transition: background .15s, border-color .15s; }
+  #uidPill.on { background: var(--accent-dim); border-color: var(--accent); }
+  #uidPill .dot { background: var(--text-dim); }
+  #uidPill.on .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+
+  /* ---- layout ---- */
+  #app {
+    flex: 1; display: grid; gap: 12px; padding: 12px;
+    grid-template-columns: 1fr; min-height: 0;
+  }
+  @media (min-width: 900px) {
+    #app { grid-template-columns: minmax(0,1fr) 340px; align-items: start; }
+  }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+  }
+  .card > summary, .card-title {
+    padding: 12px 14px; font-weight: 600; font-size: 13px;
+    cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px;
+    user-select: none;
+  }
+  .card > summary::-webkit-details-marker { display: none; }
+  .card > summary::after { content: "▾"; margin-left: auto; color: var(--text-dim); transition: transform .15s; }
+  .card:not([open]) > summary::after { transform: rotate(-90deg); }
+  .card-body { padding: 0 14px 14px; }
+
+  /* ---- console ---- */
+  /* #videoWrap's overflow:auto makes any *content-based* ("auto") height
+     resolve to ~0 wherever a browser needs to auto-size an ancestor (a
+     grid item's row track, a flexed <details>'s own box) -- max-height
+     alone doesn't help since the box is still auto-computed first, then
+     clamped. Fixed by giving the open card a *definite* height (80vh) so
+     nothing downstream needs content-based sizing; flex:1 distributes
+     from there normally. Scoped to [open] so the collapsed state still
+     shrinks to just the summary. */
+  #consoleCard[open] { display: flex; flex-direction: column; height: 80vh; }
+  #consoleBody { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  #toolbar {
+    display: flex; gap: 8px; padding: 10px; flex-wrap: wrap;
+    background: var(--surface-2); border-bottom: 1px solid var(--border);
+  }
+  .btn {
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 9px; padding: 8px 12px; cursor: pointer; font-size: 12.5px;
+    display: inline-flex; align-items: center; gap: 6px; min-height: 38px;
+  }
+  .btn:active { background: var(--accent-dim); border-color: var(--accent); }
+  .btn.primary { border-color: var(--accent); color: var(--accent); }
+  .btn.danger { border-color: var(--crit); color: var(--crit); }
+  .btn.toggled { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+  .toolbar-sep { width: 1px; background: var(--border); margin: 4px 2px; }
+
+  #videoWrap {
+    flex: 1; overflow: auto; background: #000; min-height: 240px;
+    display: flex; align-items: flex-start; justify-content: flex-start;
+    touch-action: none; position: relative;
+  }
+  canvas {
+    image-rendering: pixelated; outline: none; cursor: crosshair; display: block;
+    transform-origin: 0 0;
+  }
+  /* Blocky nearest-neighbor scaling is right for a shrunk-to-fit view (crisp
+     edges instead of blur), but the source is a lossy JPEG of rendered text,
+     not pixel art -- magnified past 1:1 with a pinch zoom, "pixelated" just
+     blows up JPEG blocking artifacts into unreadable static. Smooth
+     interpolation reads far better once actually zoomed in. */
+  canvas.zoomed-in { image-rendering: auto; }
+  #videoWrap.fit canvas { width: 100%; height: auto; }
+
+  #videoOverlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px;
+    background: rgba(11,13,18,.72); color: var(--text-dim); font-size: 13px;
+    text-align: center; padding: 20px; pointer-events: none;
+  }
+  #videoOverlay.hidden { display: none; }
+  .spinner {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 2.5px solid var(--border); border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite; display: none;
+  }
+  #videoOverlay.busy .spinner { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #mobileKbInput {
+    /* anchored to videoWrap's top-left (not left as a sibling further down
+       the page) so that when the on-screen keyboard opens, the browser's
+       "scroll the focused field into view above the keyboard" behavior
+       keeps the console itself visible instead of scrolling to wherever
+       this field's static position in the document happened to fall. */
+    position: absolute; top: 0; left: 0; opacity: 0; pointer-events: none;
+    width: 1px; height: 1px; font-size: 16px; /* 16px avoids iOS auto-zoom on focus */
+  }
+
+  /* ---- sensors ---- */
+  .grid-chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+  .chip {
+    background: var(--surface-2); border: 1px solid var(--border); border-left: 3px solid var(--text-dim);
+    border-radius: 10px; padding: 8px 10px;
+  }
+  .chip.ok { border-left-color: var(--ok); }
+  .chip.warn { border-left-color: var(--warn); }
+  .chip.crit { border-left-color: var(--crit); }
+  .chip .label { font-size: 11.5px; color: var(--text-dim); }
+  .chip .value { font-size: 16px; font-weight: 600; margin-top: 2px; }
+  .chip .sub { font-size: 10.5px; color: var(--text-dim); margin-top: 1px; }
+  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); margin: 12px 0 6px; }
+  .section-label:first-child { margin-top: 0; }
+  .empty-hint { color: var(--text-dim); font-size: 12.5px; padding: 4px 0; }
+
+  /* ---- power controls ---- */
+  .power-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .power-grid .btn { justify-content: center; width: 100%; }
+
+  /* ---- log ---- */
+  #log {
+    background: #000; color: #3ecf5f; font: 11.5px/1.4 Menlo, Consolas, monospace;
+    max-height: 260px; overflow-y: auto; padding: 8px; white-space: pre-wrap;
+    word-break: break-all; border-radius: 10px; border: 1px solid var(--border);
+  }
+  #log div { border-bottom: 1px solid #0e0e0e; padding: 1px 0; }
 </style>
 </head>
 <body>
-  <div id="toolbar">
-    <button id="btnStart">Avvia Console</button>
-    <button id="btnRefresh">Refresh</button>
-    <button id="btnCad">Ctrl+Alt+Del</button>
-    <span style="width:16px"></span>
-    <button id="btnOn">Power On</button>
-    <button id="btnReset">Reset</button>
-    <button id="btnOff">Power Off (graceful)</button>
-    <button id="btnOffHard">Power Off (hold)</button>
-    <span id="status">disconnesso</span>
-  </div>
-  <div id="main">
-    <div id="videoWrap"><canvas id="screen" width="800" height="600" tabindex="0"></canvas></div>
-    <div id="log"></div>
-  </div>
+
+<header id="topbar">
+  <h1>iLO2 <span class="server-name" id="serverName">Console</span></h1>
+  <span class="pill" id="wsPill"><span class="dot" id="wsDot"></span><span id="wsText">connessione...</span></span>
+  <span class="pill" id="powerPill"><span class="dot pulse" id="powerDot"></span><span id="powerText">verifica...</span></span>
+  <span class="pill" id="uidPill" title="Attiva/disattiva il LED UID (blu) per individuare fisicamente il server">
+    <span class="dot pulse" id="uidDot"></span><span id="uidText">verifica...</span>
+  </span>
+  <div class="spacer"></div>
+  <span class="pill" id="fwPill" style="display:none"></span>
+  <a class="pill" id="logoutLink" href="/api/logout" style="display:none; text-decoration:none; cursor:pointer;">Esci</a>
+</header>
+
+<div id="app">
+  <details class="card" id="consoleCard" open>
+    <summary>Console remota</summary>
+    <div id="consoleBody">
+      <div id="toolbar">
+        <button class="btn primary" id="btnStart">▶ Avvia console</button>
+        <button class="btn" id="btnRefresh">⟳ Aggiorna</button>
+        <button class="btn" id="btnCad">Ctrl+Alt+Canc</button>
+        <div class="toolbar-sep"></div>
+        <button class="btn" id="btnKb">⌨ Tastiera</button>
+        <button class="btn" id="btnClickL">🖱 Click sx</button>
+        <button class="btn" id="btnClickR">🖱 Click dx</button>
+        <button class="btn" id="btnFit">⤢ Adatta</button>
+      </div>
+      <div id="videoWrap" class="fit">
+        <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
+        <div id="videoOverlay">
+          <div id="videoOverlaySpinner" class="spinner"></div>
+          <div id="videoOverlayText">Console non avviata</div>
+        </div>
+        <input id="mobileKbInput" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+  </details>
+
+  <aside style="display:flex; flex-direction:column; gap:12px; min-width:0;">
+    <details class="card" open>
+      <summary>Alimentazione</summary>
+      <div class="card-body power-grid">
+        <button class="btn primary" id="btnOn">Accendi</button>
+        <button class="btn" id="btnReset">Riavvia</button>
+        <button class="btn" id="btnOff">Spegni (graceful)</button>
+        <button class="btn danger" id="btnOffHard">Spegni (forzato)</button>
+      </div>
+    </details>
+
+    <details class="card" open>
+      <summary>Sensori</summary>
+      <div class="card-body" id="sensorsBody">
+        <div class="empty-hint">In attesa dei dati dall'iLO2...</div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary>Log</summary>
+      <div class="card-body">
+        <div id="log"></div>
+      </div>
+    </details>
+  </aside>
+</div>
 
 <script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
+const videoWrap = document.getElementById('videoWrap');
 const logEl = document.getElementById('log');
-const statusEl = document.getElementById('status');
 
 function addLog(text) {
   const d = document.createElement('div');
@@ -48,20 +267,26 @@ function addLog(text) {
   while (logEl.childElementCount > 500) logEl.removeChild(logEl.firstChild);
 }
 
+// ---- websocket ----
 const wsUrl = `ws://${location.hostname}:8765/`;
+const wsDot = document.getElementById('wsDot');
+const wsText = document.getElementById('wsText');
 let ws;
 function connect() {
   ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { statusEl.textContent = 'connesso al server'; addLog('[ws] connesso a ' + wsUrl); };
-  ws.onclose = () => { statusEl.textContent = 'disconnesso, riconnessione...'; setTimeout(connect, 2000); };
+  ws.onopen = () => {
+    wsDot.className = 'dot ok pulse'; wsText.textContent = 'connesso';
+    addLog('[ws] connesso a ' + wsUrl);
+  };
+  ws.onclose = () => {
+    wsDot.className = 'dot crit'; wsText.textContent = 'disconnesso, riconnessione...';
+    setTimeout(connect, 2000);
+  };
   ws.onerror = () => {};
   ws.onmessage = async (ev) => {
     if (typeof ev.data === 'string') {
-      try {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === 'log') addLog(msg.text);
-      } catch (e) {}
+      try { handleJsonMessage(JSON.parse(ev.data)); } catch (e) {}
       return;
     }
     const blob = new Blob([ev.data], { type: 'image/jpeg' });
@@ -69,8 +294,10 @@ function connect() {
     if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
       canvas.width = bitmap.width;
       canvas.height = bitmap.height;
+      resetZoom(); // old pan/zoom no longer makes sense against a new size
     }
     ctx.drawImage(bitmap, 0, 0);
+    setVideoOverlay(null); // a real frame arrived, so there's definitely a live picture
   };
 }
 connect();
@@ -79,15 +306,183 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
+// ---- JSON message routing ----
+function handleJsonMessage(msg) {
+  if (msg.type === 'log') addLog(msg.text);
+  else if (msg.type === 'info') renderInfo(msg);
+  else if (msg.type === 'status') renderStatus(msg);
+  else if (msg.type === 'console_state') handleConsoleState(msg);
+}
+
+// ---- console connection state (avoid just showing a blank black canvas) ----
+const videoOverlay = document.getElementById('videoOverlay');
+const videoOverlayText = document.getElementById('videoOverlayText');
+
+function setVideoOverlay(text, busy) {
+  if (text === null) { videoOverlay.classList.add('hidden'); return; }
+  videoOverlay.classList.remove('hidden');
+  videoOverlay.classList.toggle('busy', !!busy);
+  videoOverlayText.textContent = text;
+}
+
+const CONSOLE_STATE_MESSAGES = {
+  idle: ['Console non avviata — premi "Avvia console"', false],
+  connecting: ['Connessione alla console in corso...', true],
+  connected: [null, false],
+  disconnected: ['Console disconnessa — premi "Avvia console" per riconnettere', false],
+  error: ['Errore di connessione alla console', false],
+  session_exhausted: ['Pool sessioni iLO2 esaurito', false],
+};
+
+function handleConsoleState(s) {
+  const [base, busy] = CONSOLE_STATE_MESSAGES[s.state] || [null, false];
+  const text = base && s.detail ? `${base}\n(${s.detail})` : base;
+  setVideoOverlay(text, busy);
+  if (s.state === 'session_exhausted') {
+    if (confirm(
+      'Il pool di sessioni web dell\'iLO2 è esaurito, quindi la console non può connettersi.\n\n' +
+      'Vuoi resettare il management processor iLO2 (RESET_RIB) per liberarlo?\n\n' +
+      'Il server FISICO non si spegne. La console/interfaccia iLO2 sarà irraggiungibile per circa 30-60 secondi.'
+    )) {
+      send({ type: 'confirm_reset' });
+    }
+  }
+}
+
+function renderInfo(info) {
+  document.getElementById('serverName').textContent = info.server_name || '';
+  const fwPill = document.getElementById('fwPill');
+  if (info.firmware_version) {
+    fwPill.style.display = '';
+    fwPill.textContent = `${info.management_processor || 'iLO2'} v${info.firmware_version}`;
+  }
+  if (info.auth_enabled) document.getElementById('logoutLink').style.display = '';
+}
+
+const powerDot = document.getElementById('powerDot');
+const powerText = document.getElementById('powerText');
+const uidPill = document.getElementById('uidPill');
+const uidDot = document.getElementById('uidDot');
+const uidText = document.getElementById('uidText');
+let currentUid = 'OFF';
+const uidIsOn = () => currentUid === 'ON' || currentUid === 'FLASHING';
+
+function renderStatus(s) {
+  const isOn = s.power === 'ON' || s.power === 'Yes';
+  powerDot.className = 'dot' + (isOn ? ' ok pulse' : '');
+  powerText.textContent = isOn ? 'Server acceso' : (s.power ? 'Server spento' : '-');
+
+  currentUid = s.uid || 'OFF';
+  const uidFlashing = currentUid === 'FLASHING';
+  const uidOn = currentUid === 'ON' || uidFlashing;
+  uidPill.classList.toggle('on', uidOn);
+  uidDot.classList.toggle('pulse', uidFlashing);
+  // iLO2 auto-flashes UID while a console session is active, as a "someone
+  // is watching remotely" indicator -- it overrides UID_CONTROL while that
+  // session is open, so make that visible instead of looking broken.
+  uidText.textContent = uidFlashing ? 'UID lampeggia (console attiva)' : (uidOn ? 'UID acceso' : 'UID');
+  uidPill.title = uidFlashing
+    ? "L'iLO2 fa lampeggiare l'UID durante una sessione console attiva; smetterà alla disconnessione."
+    : "Attiva/disattiva il LED UID (blu) per individuare fisicamente il server";
+
+  renderSensors(s);
+}
+
+function statusClass(current, caution, critical) {
+  const c = parseFloat(current);
+  if (critical != null && c >= parseFloat(critical)) return 'crit';
+  if (caution != null && c >= parseFloat(caution)) return 'warn';
+  return 'ok';
+}
+
+function renderSensors(s) {
+  const body = document.getElementById('sensorsBody');
+  const parts = [];
+
+  if (s.temperatures && s.temperatures.length) {
+    parts.push('<div class="section-label">Temperature</div><div class="grid-chips">');
+    for (const t of s.temperatures) {
+      const cls = statusClass(t.current, t.caution, t.critical);
+      parts.push(`<div class="chip ${cls}">
+        <div class="label">${t.location}</div>
+        <div class="value">${t.current}°C</div>
+        <div class="sub">${t.label}</div>
+      </div>`);
+    }
+    parts.push('</div>');
+  }
+
+  if (s.fans && s.fans.length) {
+    parts.push('<div class="section-label">Ventole</div><div class="grid-chips">');
+    for (const f of s.fans) {
+      const cls = f.status === 'Ok' ? 'ok' : 'crit';
+      parts.push(`<div class="chip ${cls}">
+        <div class="label">${f.label}</div>
+        <div class="value">${f.speed}%</div>
+        <div class="sub">${f.zone} · ${f.status}</div>
+      </div>`);
+    }
+    parts.push('</div>');
+  }
+
+  if (s.power_supplies && s.power_supplies.length) {
+    parts.push('<div class="section-label">Alimentatori</div><div class="grid-chips">');
+    for (const p of s.power_supplies) {
+      const cls = p.status === 'Ok' ? 'ok' : 'crit';
+      parts.push(`<div class="chip ${cls}">
+        <div class="label">${p.label}</div>
+        <div class="value">${p.status}</div>
+      </div>`);
+    }
+    parts.push('</div>');
+  }
+
+  if (!parts.length) {
+    body.innerHTML = '<div class="empty-hint">Nessun dato sensori disponibile.</div>';
+    return;
+  }
+  body.innerHTML = parts.join('');
+}
+
+// ---- toolbar ----
+// A RIBCL round trip is a couple of seconds even in the best case (iLO2's
+// embedded server is just slow), so give instant feedback on click instead
+// of leaving the old state on screen until the real update arrives.
+function markPending() {
+  powerDot.className = 'dot pulse';
+  powerText.textContent = 'attendere...';
+}
 document.getElementById('btnStart').onclick = () => send({ type: 'start_console' });
 document.getElementById('btnRefresh').onclick = () => send({ type: 'refresh' });
 document.getElementById('btnCad').onclick = () => send({ type: 'cad' });
-document.getElementById('btnOn').onclick = () => send({ type: 'power', action: 'on' });
-document.getElementById('btnReset').onclick = () => send({ type: 'power', action: 'reset' });
-document.getElementById('btnOff').onclick = () => send({ type: 'power', action: 'off' });
-document.getElementById('btnOffHard').onclick = () => send({ type: 'power', action: 'off_hard' });
+document.getElementById('btnOn').onclick = () => { markPending(); send({ type: 'power', action: 'on' }); };
+document.getElementById('btnReset').onclick = () => { markPending(); send({ type: 'power', action: 'reset' }); };
+document.getElementById('btnOff').onclick = () => { markPending(); send({ type: 'power', action: 'off' }); };
+document.getElementById('btnOffHard').onclick = () => { markPending(); send({ type: 'power', action: 'off_hard' }); };
+uidPill.onclick = () => {
+  uidDot.className = 'dot pulse';
+  uidText.textContent = 'attendere...';
+  send({ type: 'uid', action: uidIsOn() ? 'off' : 'on' });
+};
 
-// ---- keyboard ----
+const btnFit = document.getElementById('btnFit');
+btnFit.classList.add('toggled'); // "fit" is the default (see #videoWrap.fit in the markup)
+btnFit.onclick = () => {
+  videoWrap.classList.toggle('fit');
+  btnFit.classList.toggle('toggled', videoWrap.classList.contains('fit'));
+  resetZoom();
+};
+
+document.getElementById('btnClickL').onclick = () => {
+  send({ type: 'mousedown', button: 'left' });
+  send({ type: 'mouseup', button: 'left' });
+};
+document.getElementById('btnClickR').onclick = () => {
+  send({ type: 'mousedown', button: 'right' });
+  send({ type: 'mouseup', button: 'right' });
+};
+
+// ---- keyboard (physical, desktop + external/bluetooth keyboards) ----
 canvas.addEventListener('keydown', (e) => {
   e.preventDefault();
   const bytes = keyToBytes(e);
@@ -106,12 +501,19 @@ const SPECIAL = {
   F9: [0x1b,0x5b,0x55], F10: [0x1b,0x5b,0x56], F11: [0x1b,0x5b,0x57], F12: [0x1b,0x5b,0x58],
 };
 
-// The remote BIOS/console expects US-QWERTY input regardless of the
-// physical/OS keyboard layout in use here (this is standard for
-// BIOS-level input and is also why HP's original Java applet shipped its
-// own "LocaleTranslator"). Using e.code (the physical key position, layout
-// independent) instead of e.key (the localized character) sidesteps the
-// whole locale problem: an Italian keyboard's "M" key is still KeyM.
+// Fallback only, for browsers/keys where e.key doesn't resolve to a usable
+// single character. It used to be tried *before* e.key on the theory that
+// the remote BIOS/console expects US-QWERTY positions regardless of
+// layout ("an Italian keyboard's M key is still KeyM") -- true for letters
+// (QWERTY layouts agree on those), false for punctuation: e.code is purely
+// positional, so this table only matches reality on an actual US layout.
+// On an Italian one, nearly every symbol key differs from its US
+// US_LAYOUT entry, occasionally in a way that swaps two symbols outright
+// (e.g. the key an Italian user reaches for "?" sits at the same position
+// as US "Minus", whose table entry is "_" -- so "?" was being sent as "_"
+// and vice versa). e.key is already resolved against the user's actual
+// active layout, so it's simply more often right; keep this around for
+// keys/browsers where e.key isn't a plain character at all.
 const US_LAYOUT = {
   KeyA:['a','A'], KeyB:['b','B'], KeyC:['c','C'], KeyD:['d','D'], KeyE:['e','E'],
   KeyF:['f','F'], KeyG:['g','G'], KeyH:['h','H'], KeyI:['i','I'], KeyJ:['j','J'],
@@ -135,30 +537,162 @@ function keyToBytes(e) {
     if (m) return [m[1].charCodeAt(0) - 64]; // Ctrl+A..Z -> 0x01..0x1A
   }
   if (SPECIAL[e.key]) return SPECIAL[e.key];
-  const pair = US_LAYOUT[e.code];
-  if (pair) return [pair[e.shiftKey ? 1 : 0].charCodeAt(0)];
   if (e.key.length === 1) {
     const code = e.key.codePointAt(0);
     if (code < 256) return [code];
   }
+  const pair = US_LAYOUT[e.code];
+  if (pair) return [pair[e.shiftKey ? 1 : 0].charCodeAt(0)];
   return null;
 }
 
-// ---- mouse ----
+// ---- on-screen keyboard for touch devices ----
+// Mobile software keyboards often don't fire useful KeyboardEvent.code, so
+// typed characters are captured via 'beforeinput' (which does carry the
+// actual text even from predictive/software keyboards) and translated to
+// single-byte key presses instead; the input is kept empty so there's no
+// text state to manage or an IME composition to reconcile.
+const mobileKbInput = document.getElementById('mobileKbInput');
+const btnKb = document.getElementById('btnKb');
+let kbActive = false;
+btnKb.onclick = () => {
+  kbActive = !kbActive;
+  btnKb.classList.toggle('toggled', kbActive);
+  if (kbActive) mobileKbInput.focus(); else mobileKbInput.blur();
+};
+mobileKbInput.addEventListener('blur', () => { kbActive = false; btnKb.classList.remove('toggled'); });
+mobileKbInput.addEventListener('keydown', (e) => {
+  if (e.isComposing) return;
+  if (SPECIAL[e.key]) { e.preventDefault(); send({ type: 'key', data: SPECIAL[e.key] }); }
+});
+function sendChars(text) {
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    if (code < 256) send({ type: 'key', data: [code] });
+  }
+}
+// Some mobile IMEs (notably Android/Gboard) don't reliably honor
+// beforeinput's preventDefault() and insert into the DOM anyway. Left
+// unchecked, the accumulating text becomes context for the IME's own
+// autocorrect/prediction, which can silently replace what gets sent (a
+// plain "r" turning into a tilde or some other suggested character out of
+// nowhere) -- so force the field back to empty after every change,
+// regardless of what handled it, instead of trusting preventDefault alone.
+mobileKbInput.addEventListener('input', () => { mobileKbInput.value = ''; });
+// IME composition (predictive text, accented-letter dead keys, etc.) fires
+// its own compositionstart/…/compositionend sequence around the
+// beforeinput events; ignore the in-between ones and only act on the
+// final compositionend text, or a composed word can get sent twice, once
+// mangled and once correct.
+mobileKbInput.addEventListener('compositionend', (e) => {
+  mobileKbInput.value = '';
+  if (e.data) sendChars(e.data);
+});
+mobileKbInput.addEventListener('beforeinput', (e) => {
+  if (e.isComposing) return;
+  if (e.inputType === 'insertText' && e.data) {
+    e.preventDefault();
+    sendChars(e.data);
+  } else if (e.inputType === 'deleteContentBackward') {
+    e.preventDefault();
+    send({ type: 'key', data: [8] });
+  } else if (e.inputType === 'insertLineBreak') {
+    e.preventDefault();
+    send({ type: 'key', data: [13] });
+  }
+});
+
+// ---- pointer (mouse + touch, unified) ----
+// One finger (or the mouse) drags the remote cursor, same as before. A
+// second finger switches to local pinch-zoom/pan instead -- handled here
+// as a plain CSS transform on the canvas, never sent to the remote end --
+// so you can pinch in for a closer look at a high-res console on a small
+// screen without that gesture also dragging the remote mouse around.
 let lastX = null, lastY = null;
-canvas.addEventListener('mousemove', (e) => {
+canvas.style.touchAction = 'none';
+const BTN = ['left', 'middle', 'right'];
+
+const activePointers = new Map(); // pointerId -> {x, y} in client coords
+let zoomState = { scale: 1, x: 0, y: 0 };
+let pinch = null; // {startDist, startMidX, startMidY, startScale, startX, startY}
+
+function applyZoomTransform() {
+  canvas.style.transform = `translate(${zoomState.x}px, ${zoomState.y}px) scale(${zoomState.scale})`;
+  canvas.classList.toggle('zoomed-in', zoomState.scale > 1);
+}
+function resetZoom() {
+  zoomState = { scale: 1, x: 0, y: 0 };
+  applyZoomTransform();
+}
+function pinchGeometry() {
+  const pts = [...activePointers.values()];
+  return {
+    dist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+    midX: (pts[0].x + pts[1].x) / 2,
+    midY: (pts[0].y + pts[1].y) / 2,
+  };
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.focus();
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* e.g. pointer already gone */ }
+  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (activePointers.size === 2) {
+    lastX = lastY = null; // a second finger cancels any remote-cursor drag
+    const g = pinchGeometry();
+    pinch = { startDist: g.dist, startMidX: g.midX, startMidY: g.midY,
+              startScale: zoomState.scale, startX: zoomState.x, startY: zoomState.y };
+    return;
+  }
+  if (activePointers.size > 2) return; // ignore a third finger entirely
+
   const rect = canvas.getBoundingClientRect();
-  const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
-  const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
+  lastX = (e.clientX - rect.left) * (canvas.width / rect.width);
+  lastY = (e.clientY - rect.top) * (canvas.height / rect.height);
+  if (e.pointerType === 'mouse') {
+    send({ type: 'mousedown', button: BTN[e.button] || 'left' });
+  }
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!activePointers.has(e.pointerId)) return;
+  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (activePointers.size === 2 && pinch) {
+    const g = pinchGeometry();
+    const scale = Math.min(5, Math.max(1, pinch.startScale * (g.dist / pinch.startDist)));
+    zoomState = {
+      scale,
+      x: pinch.startX + (g.midX - pinch.startMidX),
+      y: pinch.startY + (g.midY - pinch.startMidY),
+    };
+    applyZoomTransform();
+    return;
+  }
+  if (activePointers.size >= 2) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
   if (lastX !== null) {
-    const dx = x - lastX, dy = y - lastY;
+    const dx = Math.round(x - lastX), dy = Math.round(y - lastY);
     if (dx || dy) send({ type: 'mousemove', dx, dy });
   }
   lastX = x; lastY = y;
 });
-const BTN = ['left', 'middle', 'right'];
-canvas.addEventListener('mousedown', (e) => { canvas.focus(); send({ type: 'mousedown', button: BTN[e.button] || 'left' }); });
-canvas.addEventListener('mouseup', (e) => { send({ type: 'mouseup', button: BTN[e.button] || 'left' }); });
+function endPointer(e) {
+  activePointers.delete(e.pointerId);
+  if (activePointers.size < 2) pinch = null;
+  if (activePointers.size === 0) { lastX = null; lastY = null; }
+}
+canvas.addEventListener('pointerup', (e) => {
+  if (activePointers.size === 1 && e.pointerType === 'mouse') {
+    send({ type: 'mouseup', button: BTN[e.button] || 'left' });
+  }
+  endPointer(e);
+});
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('pointerleave', (e) => { if (e.pointerType !== 'touch') endPointer(e); });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 </script>
 </body>
