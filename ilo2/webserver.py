@@ -396,6 +396,11 @@ class WebServer:
                 update = self.fb.take_update()
                 if update is not None:
                     await self._broadcast(_pack_frame(*update))
+                    bbox = self.fb.content_bbox()
+                    if bbox is not None:
+                        x0, y0, x1, y1 = bbox
+                        await self._broadcast(json.dumps(
+                            {"type": "content_bbox", "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}))
             # drain queued log/state events regardless of frame changes
             events = []
             while True:

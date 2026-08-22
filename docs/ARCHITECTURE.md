@@ -149,6 +149,16 @@ Two ways to read it back:
   newly-connected client gets once, so it has a base to draw incremental
   updates onto.
 
+`content_bbox()` is a third, unrelated read: the bounding box of non-black
+pixels (`PIL.Image.getbbox()` -- black already *is* its notion of
+"background", nothing to compute by hand), so a client can zoom to the
+part of a mostly-black BIOS/terminal screen that actually has content on
+it instead of fitting the whole (often mostly empty) reported resolution.
+`webserver.py` broadcasts it as a `content_bbox` event alongside every
+frame update; `web/index.html`'s "Adatta contenuto" button (`fitToContent()`)
+computes a zoom/pan from the latest one and applies it through the same
+`zoomState`/`applyZoomTransform()` the pinch-zoom gesture uses.
+
 Both return `(x, y, w, h, jpeg_bytes)`. Nothing about any of this is
 web-specific -- a different consumer could hang a different renderer, or a
 real encoder, off the same seam.
@@ -262,6 +272,8 @@ full frame is simply `x = y = 0` with `(w, h)` covering the whole canvas
 (triggering a canvas resize), the same code path as any smaller partial
 update -- no separate "is this a keyframe" flag needed on either side.
 Text frames are JSON with a `type` of `log`, `info` (server name/firmware,
-sent once), `status` (power/UID/health, polled), or `console_state`
+sent once), `status` (power/UID/health, polled), `console_state`
 (`idle`/`connecting`/`connected`/`disconnected`/`error`/
-`session_exhausted`, plus an optional `detail`).
+`session_exhausted`, plus an optional `detail`), or `content_bbox`
+(`x`/`y`/`w`/`h` of the non-black region, for "Adatta contenuto" -- see
+`ilo2/framebuffer.py` above).

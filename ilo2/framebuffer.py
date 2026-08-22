@@ -111,3 +111,18 @@ class FrameBuffer:
             im = self._image.copy()
         w, h = im.size
         return 0, 0, w, h, self._encode(im, quality)
+
+    def content_bbox(self):
+        """Bounding box of non-black pixels, as (x0, y0, x1, y1) with x1/y1
+        exclusive, or None if there's no video yet or the frame is entirely
+        black. Most consoles are a dark terminal/BIOS screen with real
+        content in one corner and a lot of dead black space padding out the
+        rest of whatever resolution iLO2 reported -- this is what lets a
+        client zoom to the content instead of the whole (mostly empty)
+        frame. PIL's Image.getbbox() already does exactly this for an RGB
+        image (its "background" is (0, 0, 0), i.e. black) -- no need to
+        scan pixels by hand."""
+        with self._lock:
+            if self._image is None:
+                return None
+            return self._image.getbbox()
