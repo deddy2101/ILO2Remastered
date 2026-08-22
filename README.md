@@ -1,4 +1,4 @@
-# 🖥️ ILO2Remastered
+<img src="assets/wordmark.png" alt="ILO2Remastered" width="560">
 
 A from-scratch client for HP Integrated Lights-Out 2 (iLO2), built because
 modern browsers can no longer talk to iLO2's embedded web server at all
