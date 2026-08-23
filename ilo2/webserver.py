@@ -10,6 +10,7 @@ import functools
 import http.server
 import json
 import queue
+import signal
 import socket
 import struct
 import threading
@@ -195,6 +196,13 @@ class WebServer:
     def _connect_worker(self):
         self.set_console_state("connecting")
         try:
+            # Release whatever session this object was already holding first
+            # -- start_console_thread() can run again (manual reconnect, a
+            # retry after an error) while an old cookie is still sitting in
+            # self.session, and iLO2's web-UI session pool is tiny (~2-4
+            # slots, see SessionExhaustedError) so leaking one every time
+            # this runs empties it fast. Best-effort: logout() never raises.
+            self.session.logout()
             self.log("Login sulla pagina web dell'iLO2...")
             try:
                 self.session.login()
@@ -238,6 +246,7 @@ class WebServer:
                     self.log(f"Porta KVM non armata (tentativo {attempt}/3), rifaccio login e riprovo...")
                     if attempt < 3:
                         time.sleep(1.5)
+                        self.session.logout()
                         self.session.login()
             raise last_err
         except Exception as e:
@@ -451,4 +460,17 @@ class WebServer:
 
 def main(host, username, password, http_port=8080, ws_port=8765, ilo_port=443):
     server = WebServer(host, username, password, http_port, ws_port, ilo_port)
-    asyncio.run(server.run())
+    # `docker stop`/a container restart sends SIGTERM, not SIGINT -- without
+    # this it kills the process outright and skips the finally below (only
+    # an interactive Ctrl-C would trigger it), leaking a session slot on
+    # every deploy/restart. default_int_handler raises KeyboardInterrupt,
+    # same as SIGINT, so it goes through the same shutdown path.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    try:
+        asyncio.run(server.run())
+    finally:
+        # Release our web-UI session slot on shutdown too (Ctrl-C, container
+        # restart/redeploy) -- otherwise every restart leaks one until iLO2
+        # times it out on its own, same problem _connect_worker's logout()
+        # avoids on reconnect.
+        server.session.logout()

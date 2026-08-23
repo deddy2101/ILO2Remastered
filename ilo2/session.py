@@ -57,6 +57,21 @@ class IloSession:
         self.session_cookie = m.group(1).decode()
         return self.session_cookie
 
+    def logout(self):
+        """Releases this session's slot in iLO2's small web-UI session pool
+        (see SessionExhaustedError). Best-effort and never raises -- meant
+        to be called opportunistically before a fresh login() (e.g. on
+        reconnect), so a network hiccup here shouldn't block the retry
+        that follows."""
+        if not self.session_cookie:
+            return
+        try:
+            self._get("/logout.htm")
+        except Exception:
+            pass
+        finally:
+            self.session_cookie = None
+
     def _get(self, path):
         if not self.session_cookie:
             self.login()

@@ -38,9 +38,17 @@ don't get re-discovered from scratch.
 iLO2 has a **very small pool of concurrent web-UI sessions** (observed:
 looked like roughly 2-4). Each successful `IloSession.login()` holds a slot
 until it times out server-side (the applet's own default inactivity
-timeout was 900s / 15 min, `remcons.SESSION_TIMEOUT_DEFAULT`) -- there's no
-explicit logout call in this codebase, so **repeated testing without
-waiting leaks sessions and eventually exhausts the pool**. Symptom: `GET /`
+timeout was 900s / 15 min, `remcons.SESSION_TIMEOUT_DEFAULT`), or until
+`IloSession.logout()` (`GET /logout.htm` with the session cookie -- found
+by grepping the authenticated frameset for a "Log out" link, there's no
+mention of it anywhere in iLO2's client-visible pages before you're logged
+in) releases it early. `WebServer._connect_worker` calls `logout()` before
+every `login()` (initial connect, manual reconnect, and each KVM-arming
+retry) and `webserver.main()` calls it once more on shutdown, so a running
+ILO2Remastered process only ever holds one slot at a time. Scripting
+`IloSession` directly (e.g. from a REPL) doesn't get this for free --
+**call `logout()` yourself when you're done, or repeated testing without
+it still leaks sessions and eventually exhausts the pool**. Symptom: `GET /`
 starts returning `sessionkey="NONEAVAILABLE"` and `sessionindex="ffffffff"`
 instead of real values, and `IloSession.login()` raises `LoginError`.
 
@@ -202,14 +210,11 @@ racing.
   approach (PROTOCOL.md/this file, keyboard layout section) is a simpler,
   different fix for the same underlying problem and works fine for
   BIOS/console use, but isn't a port of the original class.
-- **Real video encoding (H.264/HLS).** The web client currently pushes
-  periodic full-frame JPEG snapshots over the WebSocket, not a proper
-  video stream. Good enough for a live console view; if you need this
-  behind a real media pipeline, `ilo2/framebuffer.py::FrameBuffer` is
-  already the right seam to hang an encoder off (it's just a thread-safe
-  `PIL.Image` plus a version counter -- swap or wrap
-  `jpeg_snapshot()`/consume the paste-events differently).
-- **Session logout.** Nothing calls a web-UI logout endpoint, which is
-  part of why session exhaustion happens under repeated testing (see
-  above). Worth adding if you're scripting a lot of connect/disconnect
-  cycles.
+- **Real video encoding (H.264/HLS).** The web client gets dirty-rect JPEG
+  tiles over the WebSocket (see ARCHITECTURE.md's `FrameBuffer` section),
+  not a proper video stream. Good enough for a live console view; if you
+  need this behind a real media pipeline, `ilo2/framebuffer.py::FrameBuffer`
+  is already the right seam to hang an encoder off (it's just a thread-safe
+  `PIL.Image` plus dirty-rect tracking -- swap or wrap
+  `take_update()`/`full_snapshot()`, or consume the `paste_block()` calls
+  directly).
