@@ -3,8 +3,22 @@ services:
     build: .
     container_name: ilo2remastered
     restart: unless-stopped
-    ports:
-      - "8180:8080"
-      - "8765:8765"
+    # No ports published to the host here on purpose -- nginx is the only
+    # externally-reachable port (see below), so only one port needs to be
+    # forwarded/firewalled to reach this whole app instead of two.
+    expose:
+      - "8080"
+      - "8765"
     env_file:
       - .env
+
+  nginx:
+    image: nginx:alpine
+    container_name: ilo2remastered-proxy
+    restart: unless-stopped
+    depends_on:
+      - ilo2remastered
+    ports:
+      - "8180:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro

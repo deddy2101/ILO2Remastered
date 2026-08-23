@@ -131,7 +131,7 @@ STATUS_POLL_INTERVAL = 15  # seconds; power/UID/fans/temps don't change fast
 
 
 class WebServer:
-    def __init__(self, host, username, password, http_port=8080, ws_port=8765):
+    def __init__(self, host, username, password, http_port=8080, ws_port=8765, ilo_port=443):
         self.host = host
         self.username = username
         self.password = password
@@ -139,7 +139,15 @@ class WebServer:
         self.ws_port = ws_port
 
         self.fb = FrameBuffer()
-        self.session = IloSession(host, username, password)
+        # ilo_port: iLO2's HTTPS/RIBCL port as *this process* reaches it --
+        # 443 on the LAN, but e.g. a router's WAN-side NAT port when this is
+        # reached through a port-forward (iLO2 itself still only listens on
+        # 443; the number here is whatever gets you there). The KVM
+        # console's own port doesn't need this: IloConsole connects to
+        # whatever iLO2's own drc2fram.htm page reports (INFO6, always
+        # "23" in practice) on `host`, so a 1:1 (unmodified) port forward
+        # for that one is assumed.
+        self.session = IloSession(host, username, password, port=ilo_port)
         self.console = None
         self.clients = set()
         self._event_queue = queue.Queue()
@@ -441,6 +449,6 @@ class WebServer:
             await self._broadcast_loop()
 
 
-def main(host, username, password, http_port=8080, ws_port=8765):
-    server = WebServer(host, username, password, http_port, ws_port)
+def main(host, username, password, http_port=8080, ws_port=8765, ilo_port=443):
+    server = WebServer(host, username, password, http_port, ws_port, ilo_port)
     asyncio.run(server.run())

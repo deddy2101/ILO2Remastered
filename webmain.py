@@ -6,7 +6,10 @@ other client (future HLS transcoder, diagnostics dashboard) at the same
 WebSocket.
 
 Credentials come from the environment (see .env / ilo2/dotenv.py):
-    ILO_HOST, ILO_USER, ILO_PASSWORD
+    ILO_HOST, ILO_USER, ILO_PASSWORD, ILO_PORT (optional, default 443 --
+    for reaching iLO2 through a NAT/port-forward that maps a different
+    external port to its real 443, e.g. an emergency access path that
+    doesn't depend on the same VPN/router infra iLO2 exists to recover)
 """
 import argparse
 import os
@@ -22,6 +25,7 @@ def main():
     parser.add_argument("--host", default=os.environ.get("ILO_HOST"))
     parser.add_argument("--user", default=os.environ.get("ILO_USER", "Administrator"))
     parser.add_argument("--password", default=os.environ.get("ILO_PASSWORD"))
+    parser.add_argument("--ilo-port", type=int, default=int(os.environ.get("ILO_PORT", 443)))
     parser.add_argument("--http-port", type=int, default=8080)
     parser.add_argument("--ws-port", type=int, default=8765)
     args = parser.parse_args()
@@ -34,7 +38,7 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
-    run_webserver(args.host, args.user, args.password, args.http_port, args.ws_port)
+    run_webserver(args.host, args.user, args.password, args.http_port, args.ws_port, args.ilo_port)
 
 
 if __name__ == "__main__":

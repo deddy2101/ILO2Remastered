@@ -27,6 +27,8 @@ Dockerfile,
 docker-compose.yml Container packaging for the web client; config comes in via
                    environment variables (see .env.example), nothing baked into
                    the image
+nginx.conf         Reverse proxy unifying the HTTP page + WebSocket ports onto
+                   the one port docker-compose.yml actually publishes to the host
 docs/              This documentation
 ```
 
@@ -102,6 +104,16 @@ the connection never gets established at all on a recent OpenSSL client.
   see the "arming" note in DEVELOPMENT.md.
 - RIBCL power methods: each just builds a small RIBCL XML fragment and
   calls `legacy_tls.ribcl_raw`.
+
+`port` (constructor arg, `ILO_PORT` env var / `--ilo-port` in `webmain.py`,
+default 443) is the port *this process* reaches iLO2's HTTPS/RIBCL on --
+iLO2 itself never listens anywhere but 443, but a NAT/port-forward in
+front of it (say, a recovery path deliberately independent of the same
+VPN/router iLO2 exists to help recover) can map that to something else on
+the way in. `IloConsole`'s own port isn't affected by this: it always
+connects to whatever `INFO6` in `fetch_console_params()`'s response says
+(always "23" in practice), so a 1:1 (unmodified) port-forward for that
+one is assumed.
 
 ## `ilo2/crypto.py`
 
@@ -240,6 +252,11 @@ mobile-first:
   primary path; on a non-US layout it used to send confidently wrong
   (sometimes swapped) punctuation, since `.code` is purely positional and
   layouts disagree heavily on symbol placement
+- the WebSocket URL (`wsUrl`) picks itself based on what port the page was
+  loaded on: `:8080` (the direct-dev default -- see `webmain.py`) means no
+  reverse proxy is involved, so it goes straight to `:8765`; anything else
+  assumes it's behind `nginx.conf` (or an equivalent) unifying both ports
+  onto one, and asks for `/ws` on that same origin instead
 
 Message shapes, client → server (JSON text frames):
 

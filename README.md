@@ -79,6 +79,16 @@ docker compose up -d
 ```
 
 Same page, same port, nothing installed on the host beyond Docker itself.
+The bundled `nginx.conf` also does the "just one exposed port" part below
+for you: `docker-compose.yml`'s `ilo2remastered` service isn't published
+to the host at all (`expose`, not `ports`) — only the `nginx` service is,
+proxying both the page and the WebSocket (path `/ws`) through the single
+port it publishes (`8180` by default).
+
+Running without Docker (`python3 webmain.py` directly)? The page and the
+WebSocket are two separate ports there (`--http-port`/`--ws-port`, 8080/
+8765 by default) unless you put your own reverse proxy in front the same
+way `nginx.conf` does.
 
 ## 🌍 Exposing this beyond your LAN
 
@@ -86,20 +96,26 @@ This app can view the server's console, send it keyboard/mouse input, and
 power-cycle it — treat it like physical access to the machine. If it's
 reachable from anywhere you don't fully trust:
 
-1. **Put a TLS-terminating reverse proxy in front of it** (nginx, Caddy,
-   Traefik, ...) forwarding to `http_port` (8080) and `ws_port` (8765).
-   Everything here is plain `http://`/`ws://` — with a login, that means
-   sending the password (and every key pressed in the remote console,
-   including whatever you type into the server's own OS login) in the
-   clear otherwise.
+1. **Terminate TLS somewhere in front of it.** `nginx.conf` unifies the
+   two ports but still speaks plain `http://`/`ws://` on its own listening
+   side — add a cert there (or put another TLS-terminating proxy, or your
+   router/firewall's own reverse proxy, in front of *that*). Without it,
+   the login password and every key pressed in the remote console
+   (including whatever gets typed into the server's own OS login) cross
+   the network in the clear.
 2. **Set `WEBAPP_USER`/`WEBAPP_PASSWORD` in `.env`** (see
    `.env.example`) to require a login before the page or the WebSocket
    will do anything. Both are unset by default, so it's open to anyone who
    can reach the port — fine on a trusted LAN, not fine otherwise.
-3. Make sure your proxy passes through `X-Forwarded-Proto: https` (most do
-   by default) — the session cookie only gets marked `Secure` when it sees
-   that header, so it knows it's actually safe to send over HTTPS instead
-   of assuming and breaking plain-`http://` local testing.
+3. Make sure whatever terminates TLS passes through `X-Forwarded-Proto:
+   https` (`nginx.conf` already does) — the session cookie only gets
+   marked `Secure` when it sees that header, so it knows it's actually
+   safe to send over HTTPS instead of assuming and breaking plain-`http://`
+   local testing.
+4. If you're reaching iLO2 itself through a NAT/port-forward that maps a
+   different external port to its real 443 (say, as a recovery path that
+   deliberately doesn't depend on the same VPN/router this app usually
+   goes through), set `ILO_PORT` in `.env` to that mapped port.
 
 ## ✅ Status
 

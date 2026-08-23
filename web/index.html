@@ -278,7 +278,17 @@ function addLog(text) {
 }
 
 // ---- websocket ----
-const wsUrl = `ws://${location.hostname}:8765/`;
+// Direct dev (`python3 webmain.py`, no reverse proxy): the page and the
+// WebSocket are two separate ports (--http-port/--ws-port, 8080/8765 by
+// default) -- keep hitting the WS port directly. Behind a reverse proxy
+// unifying both onto one exposed port (see nginx.conf), there's no
+// separate WS port to reach: the proxy expects the WS upgrade at /ws on
+// the same origin as the page itself.
+const wsUrl = (() => {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (location.port === '8080') return `${proto}//${location.hostname}:8765/`;
+  return `${proto}//${location.host}/ws`;
+})();
 const wsDot = document.getElementById('wsDot');
 const wsText = document.getElementById('wsText');
 let ws;
