@@ -377,6 +377,18 @@ class WebServer:
             c.send_mouse_release(self._button_code(msg.get("button")))
         elif mtype == "refresh" and c:
             c.refresh_screen()
+        elif mtype == "force_full_frame":
+            # Manual escape hatch: dirty-rect diffing means a client that
+            # somehow missed/misapplied one update (a decode race, a dropped
+            # binary frame) just keeps compounding it forever, since every
+            # later diff is only computed against server-side state, not
+            # against what that client actually has on screen. This resends
+            # the whole current frame, independent of the diff stream, to
+            # every connected client (matches the shared-viewing model --
+            # anyone's screen can get stuck, not just the one who clicks).
+            snap = self.fb.full_snapshot()
+            if snap is not None:
+                await self._broadcast(_pack_frame(*snap))
         elif mtype == "cad" and c:
             c.send_ctrl_alt_del()
         elif mtype == "start_console":

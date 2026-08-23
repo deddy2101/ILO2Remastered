@@ -267,10 +267,21 @@ Message shapes, client → server (JSON text frames):
 {"type": "mousemove", "dx": <int>, "dy": <int>}
 {"type": "mousedown"|"mouseup", "button": "left"|"middle"|"right"}
 {"type": "refresh"}
+{"type": "force_full_frame"}
 {"type": "cad"}
 {"type": "power", "action": "on"|"off"|"off_hard"|"reset"}
 {"type": "uid", "action": "on"|"off"}
 ```
+
+`refresh` and `force_full_frame` are not the same thing: `refresh` asks
+*iLO2* to redraw the current screen over DVC (useful when the remote OS
+just isn't repainting anything, e.g. a frozen cursor blink); `force_full_frame`
+asks *this backend* to resend `FrameBuffer.full_snapshot()` to every
+connected client over the WebSocket, independent of DVC entirely --
+useful when a client's own canvas has drifted from what the backend
+actually has (a decode race, a missed/misapplied dirty-rect diff), since
+otherwise every later diff just keeps compounding whatever went wrong
+rather than fixing it.
 
 Server → client: binary frames are a video update -- an 8-byte header,
 `x`/`y`/`w`/`h` as big-endian uint16 (`struct.Struct("!HHHH")`), then that
