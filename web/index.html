@@ -171,8 +171,10 @@
     align-items: center; justify-content: center; gap: 12px;
     background: rgba(11,13,18,.72); color: var(--text-dim); font-size: 13px;
     text-align: center; padding: 20px; pointer-events: none;
+    white-space: pre-line;
   }
   #videoOverlay.hidden { display: none; }
+  #videoOverlay.bad { background: rgba(60,15,20,.78); color: #ffb4bd; }
   .spinner {
     width: 22px; height: 22px; border-radius: 50%;
     border: 2.5px solid var(--border); border-top-color: var(--accent);
@@ -406,26 +408,31 @@ function handleJsonMessage(msg) {
 const videoOverlay = document.getElementById('videoOverlay');
 const videoOverlayText = document.getElementById('videoOverlayText');
 
-function setVideoOverlay(text, busy) {
+function setVideoOverlay(text, busy, bad) {
   if (text === null) { videoOverlay.classList.add('hidden'); return; }
   videoOverlay.classList.remove('hidden');
   videoOverlay.classList.toggle('busy', !!busy);
+  videoOverlay.classList.toggle('bad', !!bad);
   videoOverlayText.textContent = text;
 }
 
+// [message, busy (show spinner), bad (red tint -- something's actually
+// wrong, not just idle/working)]. The backend retries a dropped/failed
+// console connection on its own every ~20s, so these say so instead of
+// telling the user to click "Avvia console" themselves.
 const CONSOLE_STATE_MESSAGES = {
-  idle: ['Console non avviata — premi "Avvia console"', false],
-  connecting: ['Connessione alla console in corso...', true],
-  connected: [null, false],
-  disconnected: ['Console disconnessa — premi "Avvia console" per riconnettere', false],
-  error: ['Errore di connessione alla console', false],
-  session_exhausted: ['Pool sessioni iLO2 esaurito', false],
+  idle: ['Console non avviata — premi "Avvia console"', false, false],
+  connecting: ['Connessione alla console in corso...', true, false],
+  connected: [null, false, false],
+  disconnected: ['Console disconnessa — nuovo tentativo automatico a breve...', true, true],
+  error: ['Errore di connessione alla console — nuovo tentativo automatico a breve...', true, true],
+  session_exhausted: ['Pool sessioni iLO2 esaurito', false, true],
 };
 
 function handleConsoleState(s) {
-  const [base, busy] = CONSOLE_STATE_MESSAGES[s.state] || [null, false];
+  const [base, busy, bad] = CONSOLE_STATE_MESSAGES[s.state] || [null, false, false];
   const text = base && s.detail ? `${base}\n(${s.detail})` : base;
-  setVideoOverlay(text, busy);
+  setVideoOverlay(text, busy, bad);
   if (s.state === 'session_exhausted') {
     if (confirm(
       'Il pool di sessioni web dell\'iLO2 è esaurito, quindi la console non può connettersi.\n\n' +
