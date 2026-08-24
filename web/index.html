@@ -64,12 +64,14 @@
   #uidPill.on .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
 
   /* ---- layout ---- */
+  /* Single column, full-width cards stacked top to bottom (console, then
+     sensors, then log) -- power controls live in the header instead of a
+     sidebar card, so there's no more secondary column to lay out; a
+     narrow 340px sidebar was cramping the sensor grid for no reason when
+     the full page width was sitting right there below the console. */
   #app {
-    flex: 1; display: grid; gap: 12px; padding: 12px;
-    grid-template-columns: 1fr; min-height: 0;
-  }
-  @media (min-width: 900px) {
-    #app { grid-template-columns: minmax(0,1fr) 340px; align-items: start; }
+    flex: 1; display: flex; flex-direction: column; gap: 12px; padding: 12px;
+    min-height: 0;
   }
 
   .card {
@@ -87,25 +89,30 @@
   .card-body { padding: 0 14px 14px; }
 
   /* ---- console ---- */
-  /* #videoWrap's overflow:auto makes any *content-based* ("auto") height
-     resolve to ~0 wherever a browser needs to auto-size an ancestor (a
-     grid item's row track, a flexed <details>'s own box) -- max-height
-     alone doesn't help since the box is still auto-computed first, then
-     clamped. Fixed by giving the open card a *definite* height (80vh) so
-     nothing downstream needs content-based sizing; flex:1 distributes
-     from there normally. Scoped to [open] so the collapsed state still
+  /* <details> has real quirks as a flex container: flexing it directly
+     used to collapse its own box to ~0 (worked around below by giving it
+     a *definite* height, 80vh, instead of content-based sizing) -- and
+     separately, it doesn't reliably flex-grow a child (#consoleBody) to
+     fill the space left after <summary>; the child just sat at its own
+     content height no matter how much free space consoleCard actually
+     had. Rather than fight <details> further, consoleCard stays a plain
+     block (just sized+clipped) and #consoleBody's actual height is
+     computed in JS instead (see fitConsoleBody) -- a plain div with a
+     JS-set pixel height doesn't depend on flex distribution through
+     <details> at all. Scoped to [open] so the collapsed state still
      shrinks to just the summary. */
-  #consoleCard[open] { display: flex; flex-direction: column; height: 80vh; }
-  #consoleBody { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  #consoleCard[open] { height: 80vh; overflow: hidden; }
+  #consoleBody { display: flex; flex-direction: column; min-height: 0; }
   /* Fullscreen the whole card (toolbar included), not just #videoWrap --
      the toolbar has the only way back out (well, besides Esc) plus
      Ctrl+Alt+Canc, the on-screen keyboard toggle, etc., and none of that
      is reachable while fullscreen if it's not inside the fullscreen
-     element itself. Browser-native fullscreen scaling also just works,
-     no custom fit/zoom math to get wrong (see git history: it's been
-     wrong twice already). */
+     element itself. #consoleBody's height is recomputed by JS on
+     fullscreenchange (a plain "height:100% !important" override here
+     didn't reliably win against the fullscreen transition's own layout
+     settling -- JS re-running fitConsoleBody() shortly after the
+     transition is more reliable than a static CSS rule). */
   #consoleCard:fullscreen { height: 100vh; background: var(--surface); }
-  #consoleCard:fullscreen #videoWrap { flex: 1; }
   #toolbar {
     display: flex; gap: 8px; padding: 10px; flex-wrap: wrap;
     background: var(--surface-2); border-bottom: 1px solid var(--border);
@@ -119,7 +126,7 @@
   .btn.primary { border-color: var(--accent); color: var(--accent); }
   .btn.danger { border-color: var(--crit); color: var(--crit); }
   .btn.toggled { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
-  .toolbar-sep { width: 1px; background: var(--border); margin: 4px 2px; }
+  .toolbar-sep { width: 1px; height: 22px; background: var(--border); margin: 4px 2px; align-self: center; }
 
   #videoWrap {
     flex: 1; overflow: auto; background: #000; min-height: 240px;
@@ -129,6 +136,17 @@
   canvas {
     image-rendering: pixelated; outline: none; cursor: crosshair; display: block;
     transform-origin: 0 0;
+    /* Absolutely positioned (JS sets top/left/width/height -- see
+       fitCanvasToContainer) so it never participates in videoWrap's flex
+       sizing at all. A canvas is a "replaced element": even sized purely
+       via CSS width/height, a normal in-flow canvas still lets its
+       *intrinsic* size (the native ~1600x900 resolution, or even just the
+       800x600 HTML default before the first real frame) leak into the
+       very first flex layout pass, which videoWrap's own measured size
+       was then based on -- a circular dependency that made "fit"
+       converge on the wrong, too-large box. Taking it out of flow
+       entirely breaks that circle. */
+    position: absolute; top: 0; left: 0;
   }
   /* Blocky nearest-neighbor scaling is right for a shrunk-to-fit view (crisp
      edges instead of blur), but the source is a lossy JPEG of rendered text,
@@ -136,7 +154,17 @@
      blows up JPEG blocking artifacts into unreadable static. Smooth
      interpolation reads far better once actually zoomed in. */
   canvas.zoomed-in { image-rendering: auto; }
-  #videoWrap.fit canvas { width: 100%; height: auto; }
+  /* Sizing for .fit is applied inline by JS (fitCanvasToContainer), not
+     here: max-width/max-height:100% would need videoWrap's height to be
+     CSS-"definite" to resolve against, and a flex:1 item's height isn't
+     reliably treated as definite for percentage-resolution purposes --
+     in practice that made max-height resolve to "none" and only the
+     width constraint ever applied, letting the frame's bottom overflow
+     past the visible card. Computing the "contain" size in JS from
+     actual measured pixel dimensions sidesteps that ambiguity entirely,
+     and also lets native resolution win outright when it already fits
+     (see fitCanvasToContainer's scale cap) instead of always stretching
+     to fill 100% width regardless. */
 
   #videoOverlay {
     position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -179,10 +207,6 @@
   .section-label:first-child { margin-top: 0; }
   .empty-hint { color: var(--text-dim); font-size: 12.5px; padding: 4px 0; }
 
-  /* ---- power controls ---- */
-  .power-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .power-grid .btn { justify-content: center; width: 100%; }
-
   /* ---- log ---- */
   #log {
     background: #000; color: #3ecf5f; font: 11.5px/1.4 Menlo, Consolas, monospace;
@@ -201,6 +225,11 @@
   <span class="pill" id="uidPill" title="Attiva/disattiva il LED UID (blu) per individuare fisicamente il server">
     <span class="dot pulse" id="uidDot"></span><span id="uidText">verifica...</span>
   </span>
+  <div class="toolbar-sep"></div>
+  <button class="btn primary" id="btnOn">Accendi</button>
+  <button class="btn" id="btnReset">Riavvia</button>
+  <button class="btn" id="btnOff">Spegni</button>
+  <button class="btn danger" id="btnOffHard">Spegni (forzato)</button>
   <div class="spacer"></div>
   <span class="pill" id="fwPill" style="display:none"></span>
   <a class="pill" id="logoutLink" href="/api/logout" style="display:none; text-decoration:none; cursor:pointer;">Esci</a>
@@ -233,31 +262,19 @@
     </div>
   </details>
 
-  <aside style="display:flex; flex-direction:column; gap:12px; min-width:0;">
-    <details class="card" open>
-      <summary>Alimentazione</summary>
-      <div class="card-body power-grid">
-        <button class="btn primary" id="btnOn">Accendi</button>
-        <button class="btn" id="btnReset">Riavvia</button>
-        <button class="btn" id="btnOff">Spegni (graceful)</button>
-        <button class="btn danger" id="btnOffHard">Spegni (forzato)</button>
-      </div>
-    </details>
+  <details class="card" id="sensorsCard" open>
+    <summary>Sensori</summary>
+    <div class="card-body" id="sensorsBody">
+      <div class="empty-hint">In attesa dei dati dall'iLO2...</div>
+    </div>
+  </details>
 
-    <details class="card" open>
-      <summary>Sensori</summary>
-      <div class="card-body" id="sensorsBody">
-        <div class="empty-hint">In attesa dei dati dall'iLO2...</div>
-      </div>
-    </details>
-
-    <details class="card">
-      <summary>Log</summary>
-      <div class="card-body">
-        <div id="log"></div>
-      </div>
-    </details>
-  </aside>
+  <details class="card" id="logCard">
+    <summary>Log</summary>
+    <div class="card-body">
+      <div id="log"></div>
+    </div>
+  </details>
 </div>
 
 <script>
@@ -269,6 +286,37 @@ const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
 const videoWrap = document.getElementById('videoWrap');
 const logEl = document.getElementById('log');
+
+// ---- consoleBody: fill consoleCard's height minus <summary>'s, in JS
+// because <details> doesn't reliably flex-grow a child to do this itself
+// (see the #consoleCard[open] comment in <style>). ----
+const consoleCard = document.getElementById('consoleCard');
+const consoleBody = document.getElementById('consoleBody');
+const consoleSummary = consoleCard.querySelector('summary');
+function fitConsoleBody() {
+  if (!consoleCard.open) return;
+  const h = consoleCard.clientHeight - consoleSummary.offsetHeight;
+  if (h > 0) consoleBody.style.height = h + 'px';
+}
+new ResizeObserver(fitConsoleBody).observe(consoleCard);
+consoleCard.addEventListener('toggle', fitConsoleBody);
+
+// ---- "fit" sizing: contain the frame within videoWrap on both axes ----
+// Driven from measured pixel sizes (not CSS max-%) -- see the .fit comment
+// in <style> for why the pure-CSS version doesn't reliably work here.
+function fitCanvasToContainer() {
+  if (!videoWrap.classList.contains('fit')) return;
+  const availW = videoWrap.clientWidth, availH = videoWrap.clientHeight;
+  if (!availW || !availH || !canvas.width || !canvas.height) return;
+  // Capped at 1: shrink to fit when the native resolution doesn't fit the
+  // available space, but never scale *up* past native size just because
+  // there's room -- on a big desktop window, 1:1 pixels read better than
+  // a blown-up, blurrier frame filling the extra space for no reason.
+  const scale = Math.min(availW / canvas.width, availH / canvas.height, 1);
+  canvas.style.width = Math.floor(canvas.width * scale) + 'px';
+  canvas.style.height = Math.floor(canvas.height * scale) + 'px';
+}
+new ResizeObserver(fitCanvasToContainer).observe(videoWrap);
 
 function addLog(text) {
   const d = document.createElement('div');
@@ -510,12 +558,13 @@ const btnFit = document.getElementById('btnFit');
 btnFit.classList.add('toggled'); // "fit" is the default (see #videoWrap.fit in the markup)
 btnFit.onclick = () => {
   videoWrap.classList.toggle('fit');
-  btnFit.classList.toggle('toggled', videoWrap.classList.contains('fit'));
+  const fitting = videoWrap.classList.contains('fit');
+  btnFit.classList.toggle('toggled', fitting);
+  if (!fitting) { canvas.style.width = ''; canvas.style.height = ''; } // back to native size
   resetZoom();
 };
 
 // ---- fullscreen ----
-const consoleCard = document.getElementById('consoleCard');
 const btnFullscreen = document.getElementById('btnFullscreen');
 btnFullscreen.onclick = () => {
   if (document.fullscreenElement) {
@@ -530,6 +579,14 @@ document.addEventListener('fullscreenchange', () => {
   const active = document.fullscreenElement === consoleCard;
   btnFullscreen.classList.toggle('toggled', active);
   btnFullscreen.textContent = active ? '⛶ Esci da schermo intero' : '⛶ Schermo intero';
+  // Don't rely solely on the ResizeObserver here: the fullscreen
+  // transition's own layout settling can land a resize callback on a
+  // transient intermediate size, and consoleBody's #consoleCard:fullscreen
+  // CSS override doesn't reliably win either -- recompute explicitly,
+  // and once more shortly after in case the transition is still animating.
+  fitConsoleBody();
+  fitCanvasToContainer();
+  setTimeout(() => { fitConsoleBody(); fitCanvasToContainer(); }, 250);
 });
 
 document.getElementById('btnClickL').onclick = () => {
@@ -691,6 +748,7 @@ function applyZoomTransform() {
 function resetZoom() {
   zoomState = { scale: 1, x: 0, y: 0 };
   applyZoomTransform();
+  fitCanvasToContainer();
 }
 function pinchGeometry() {
   const pts = [...activePointers.values()];
@@ -715,7 +773,12 @@ canvas.addEventListener('pointerdown', (e) => {
   if (kbActive) {
     e.preventDefault();
   } else {
-    canvas.focus();
+    // preventScroll: true -- otherwise the browser's default "scroll the
+    // newly-focused element into view" kicks in on every click/tap, and
+    // once the canvas is zoomed in (or just taller than the viewport)
+    // that scrolls the whole page, shoving the toolbar/header off-screen
+    // above it instead of leaving the layout alone.
+    canvas.focus({ preventScroll: true });
   }
   try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* e.g. pointer already gone */ }
   activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });

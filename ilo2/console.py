@@ -136,23 +136,41 @@ class IloConsole:
             self._raw_send(login)
             return
         header = bytes([0xFF, 0xC0]) + self._key_index.to_bytes(4, "big", signed=False)
-        encrypted = self._rc4_encrypt.xor(login)
-        self._raw_send(header + encrypted)
+        with self._send_lock:
+            encrypted = self._rc4_encrypt.xor(login)
+            self._raw_send(header + encrypted)
 
     def transmit(self, data: bytes):
-        if not self.encryption_enabled:
-            self._raw_send(data)
-            return
-        self._raw_send(self._rc4_encrypt.xor(data))
+        # transmit() is called from more than one thread -- keyboard/mouse
+        # from the asyncio loop thread handling client messages, but also
+        # refresh_screen() straight from the DVC decoder's own error
+        # recovery (see dvc.py's on_refresh_request, which fires often --
+        # it's not a rare edge case). RC4 is a stream cipher: xor() mutates
+        # shared keystream state as a side effect, so if two threads called
+        # it concurrently the two streams would interleave into a keystream
+        # position neither thread actually expects, corrupting whatever
+        # both of them send from then on. The lock has to cover the xor()
+        # *and* the socket write as one atomic unit, not just the write --
+        # encrypting under the lock but sending outside it would still let
+        # two encrypted buffers reach the socket in a different order than
+        # they were encrypted in.
+        with self._send_lock:
+            if not self.encryption_enabled:
+                self._raw_send(data)
+                return
+            self._raw_send(self._rc4_encrypt.xor(data))
 
     def _raw_send(self, data: bytes):
+        # Caller must hold _send_lock. No lock taken here -- both callers
+        # (transmit(), _send_login()) need it held across their own
+        # xor() too, so re-acquiring here would either deadlock (Lock) or
+        # silently stop protecting the xor call (RLock).
         if not self.sock or not data:
             return
-        with self._send_lock:
-            try:
-                self.sock.sendall(data)
-            except OSError as e:
-                self.log(f"console: send error: {e!r}")
+        try:
+            self.sock.sendall(data)
+        except OSError as e:
+            self.log(f"console: send error: {e!r}")
 
     def refresh_screen(self):
         self.transmit(b"\x1b[~")

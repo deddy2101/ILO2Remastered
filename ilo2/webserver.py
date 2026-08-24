@@ -129,6 +129,7 @@ _MOUSE_CENTER = 2
 _MOUSE_RIGHT = 1
 
 STATUS_POLL_INTERVAL = 15  # seconds; power/UID/fans/temps don't change fast
+RECONNECT_DELAY = 20  # seconds between automatic console reconnect attempts
 
 
 class WebServer:
@@ -192,6 +193,18 @@ class WebServer:
     def _on_console_disconnected(self, reason):
         self.log(f"Disconnesso: {reason}")
         self.set_console_state("disconnected", reason)
+        self._schedule_reconnect()
+
+    def _schedule_reconnect(self, delay=RECONNECT_DELAY):
+        """The console is meant to stay live for as long as the backend
+        runs, not just until the first disconnect -- a human shouldn't have
+        to notice it dropped and click "Avvia console" again. Skipped for
+        session_exhausted, which needs the user's explicit go-ahead first
+        (see _connect_worker/confirm_reset) rather than retrying blindly."""
+        self.log(f"Nuovo tentativo di connessione console tra {delay}s...")
+        timer = threading.Timer(delay, self.start_console_thread)
+        timer.daemon = True  # don't keep the process alive on a pending retry
+        timer.start()
 
     def _connect_worker(self):
         self.set_console_state("connecting")
@@ -252,6 +265,7 @@ class WebServer:
         except Exception as e:
             self.log(f"ERRORE connessione console: {e!r}")
             self.set_console_state("error", str(e))
+            self._schedule_reconnect()
         finally:
             self._connecting.release()
 
